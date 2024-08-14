@@ -28,6 +28,8 @@ use html5ever::{
     ATOM_LOCALNAME__65_6D as TAG_EM, ATOM_LOCALNAME__68_72_65_66 as ATTR_HREF,
     ATOM_LOCALNAME__69 as TAG_I, ATOM_LOCALNAME__70_72_65 as TAG_PRE, ATOM_LOCALNAME__73 as TAG_S,
     ATOM_LOCALNAME__73_74_72_6F_6E_67 as TAG_STRONG, ATOM_LOCALNAME__75 as TAG_U,
+    ATOM_LOCALNAME__69_63_6F_6E as TAG_EMOJI,  // icon
+    ATOM_LOCALNAME__69_64 as ATTR_ID
 };
 
 const CODE_LANG_PREFIX: &str = "language-";
@@ -69,14 +71,8 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
                             .push(tl::types::MessageEntityUnderline { offset, length }.into());
                     }
                     TAG_BLOCKQUOTE => {
-                        self.entities.push(
-                            tl::types::MessageEntityBlockquote {
-                                offset,
-                                length,
-                                collapsed: false,
-                            }
-                            .into(),
-                        );
+                        self.entities
+                            .push(tl::types::MessageEntityBlockquote { offset, length }.into());
                     }
                     TAG_DETAILS => {
                         self.entities
@@ -125,7 +121,7 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
                                 tl::types::MessageEntityMentionName {
                                     offset,
                                     length,
-                                    user_id,
+                                    user_id: user_id,
                                 }
                                 .into(),
                             );
@@ -134,11 +130,27 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
                                 tl::types::MessageEntityTextUrl {
                                     offset,
                                     length,
-                                    url,
+                                    url: url,
                                 }
                                 .into(),
                             );
                         }
+                    }
+                    TAG_EMOJI => {
+                        let raw_id = attrs
+                            .into_iter()
+                            .find(|a| a.name.local == ATTR_ID)
+                            .map(|a| a.value.to_string())
+                            .unwrap_or_else(|| "".to_string());
+                        let document_id = raw_id.parse::<i64>().unwrap();
+                        self.entities.push(
+                            tl::types::MessageEntityCustomEmoji {
+                                offset,
+                                length,
+                                document_id: document_id,
+                            }
+                            .into(),
+                        );
                     }
                     _ => {}
                 },
@@ -189,6 +201,9 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
                                 update_entity_len!(TextUrl(self.offset) in self.entities);
                             }
                         }
+                    }
+                    TAG_EMOJI => {
+                        update_entity_len!(CustomEmoji(self.offset) in self.entities);
                     }
                     _ => {}
                 },
@@ -331,7 +346,12 @@ pub fn generate_html_message(message: &str, entities: &[tl::enums::MessageEntity
                     Segment::Fixed("</details>"),
                 ));
             }
-            ME::CustomEmoji(_) => {}
+            ME::CustomEmoji(e) => {
+                insertions.push((before(i, 0, e.offset), Segment::Fixed("<icon id=")));
+                insertions.push((before(i, 1, e.offset), Segment::Number(e.document_id)));
+                insertions.push((before(i, 2, e.offset), Segment::Fixed(">")));
+                insertions.push((after(i, 0, e.offset + e.length), Segment::Fixed("</icon>")));
+            }
         });
 
     inject_into_message(message, insertions)
@@ -379,6 +399,21 @@ mod tests {
             vec![tl::types::MessageEntityBold {
                 offset: 2,
                 length: 9
+            }
+            .into()]
+        );
+    }
+
+    #[test]
+    fn parse_custom_emoji() {
+        let (text, entities) = parse_html_message("A <icon id=123>a</icon> here");
+        assert_eq!(text, "A a here");
+        assert_eq!(
+            entities,
+            vec![tl::types::MessageEntityCustomEmoji {
+                offset: 2,
+                length: 1,
+                document_id: 123
             }
             .into()]
         );
@@ -547,7 +582,7 @@ mod tests {
     fn parse_then_unparse() {
         let html = "Some <b>bold</b>, <i>italics</i> inline <code>code</code>, \
         a <pre>pre</pre> block <pre><code class=\"language-rs\">use rust;</code></pre>, \
-        a <a href=\"https://example.com\"><b>link</b></a>, <details>spoilers</details> and \
+        a <a href=\"https://example.com\"><b>link</b></a>, <icon id=333>fo</icon> <details>spoilers</details> and \
         <a href=\"tg://user?id=12345678\">mentions</a>";
         let (text, entities) = parse_html_message(html);
         let generated = generate_html_message(&text, &entities);

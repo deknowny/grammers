@@ -14,18 +14,18 @@ use std::collections::VecDeque;
 ///
 /// End-users should obtain particular instances of this type via client methods.
 pub struct IterBuffer<R, T> {
-    pub(crate) client: Client,
-    pub(crate) limit: Option<usize>,
-    pub(crate) fetched: usize,
-    pub(crate) buffer: VecDeque<T>,
-    pub(crate) last_chunk: bool,
-    pub(crate) total: Option<usize>,
-    pub(crate) request: R,
+    pub client: Client,
+    pub limit: Option<usize>,
+    pub fetched: usize,
+    pub buffer: VecDeque<T>,
+    pub last_chunk: bool,
+    pub total: Option<usize>,
+    pub request: R,
 }
 
 impl<R, T> IterBuffer<R, T> {
     /// Create a new `IterBuffer` instance from a handle, capacity and request.
-    pub(crate) fn from_request(client: &Client, capacity: usize, request: R) -> Self {
+    pub fn from_request(client: &Client, capacity: usize, request: R) -> Self {
         Self {
             client: client.clone(),
             limit: None,
@@ -59,7 +59,7 @@ impl<R, T> IterBuffer<R, T> {
     ///
     /// Data does not need to be fetched if the limit is reached or the buffer is empty and the
     /// last chunk was reached.
-    pub(crate) fn next_raw(&mut self) -> Option<Result<Option<T>, InvocationError>> {
+    pub fn next_raw(&mut self) -> Option<Result<Option<T>, InvocationError>> {
         if self.limit_reached() || (self.buffer.is_empty() && self.last_chunk) {
             Some(Ok(None))
         } else {
@@ -69,7 +69,7 @@ impl<R, T> IterBuffer<R, T> {
 
     /// Determines the new "limit" for the request, so that no unnecessary items are fetched from
     /// the network.
-    pub(crate) fn determine_limit(&self, max: usize) -> i32 {
+    pub fn determine_limit(&self, max: usize) -> i32 {
         if let Some(limit) = self.limit {
             if self.fetched < limit {
                 (limit - self.fetched).min(max) as i32
@@ -82,7 +82,7 @@ impl<R, T> IterBuffer<R, T> {
     }
 
     /// Pop a buffered item from the queue, and increment the amount of items fetched (returned).
-    pub(crate) fn pop_item(&mut self) -> Option<T> {
+    pub fn pop_item(&mut self) -> Option<T> {
         if let Some(item) = self.buffer.pop_front() {
             self.fetched += 1;
             Some(item)

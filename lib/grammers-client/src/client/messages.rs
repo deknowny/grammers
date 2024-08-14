@@ -555,6 +555,90 @@ impl Client {
         })
     }
 
+    pub async fn send_message_lossy<C: Into<InputPeer>, M: Into<types::InputMessage>>(
+        &self,
+        chat: C,
+        message: M,
+    ) -> Result<Option<Message>, InvocationError> {
+        let chat = chat.into();
+        let message = message.into();
+        let random_id = generate_random_id();
+        let entities = parse_mention_entities(self, message.entities.clone());
+        let updates = if let Some(media) = message.media.clone() {
+            self.invoke(&tl::functions::messages::SendMedia {
+                silent: message.silent,
+                background: message.background,
+                clear_draft: message.clear_draft,
+                peer: chat,
+                reply_to: message.reply_to.map(|reply_to_msg_id| {
+                    tl::types::InputReplyToMessage {
+                        reply_to_msg_id,
+                        top_msg_id: None,
+                        reply_to_peer_id: None,
+                        quote_text: None,
+                        quote_entities: None,
+                        quote_offset: None,
+                    }
+                    .into()
+                }),
+                media,
+                message: message.text.clone(),
+                random_id,
+                reply_markup: message.reply_markup.clone(),
+                entities,
+                schedule_date: message.schedule_date,
+                send_as: None,
+                noforwards: false,
+                update_stickersets_order: false,
+                invert_media: false,
+                quick_reply_shortcut: None,
+                effect: None,
+            })
+            .await
+        } else {
+            self.invoke(&tl::functions::messages::SendMessage {
+                no_webpage: !message.link_preview,
+                silent: message.silent,
+                background: message.background,
+                clear_draft: message.clear_draft,
+                peer: chat,
+                reply_to: message.reply_to.map(|reply_to_msg_id| {
+                    tl::types::InputReplyToMessage {
+                        reply_to_msg_id,
+                        top_msg_id: None,
+                        reply_to_peer_id: None,
+                        quote_text: None,
+                        quote_entities: None,
+                        quote_offset: None,
+                    }
+                    .into()
+                }),
+                message: message.text.clone(),
+                random_id,
+                reply_markup: message.reply_markup.clone(),
+                entities,
+                schedule_date: message.schedule_date,
+                send_as: None,
+                noforwards: false,
+                update_stickersets_order: false,
+                invert_media: false,
+                quick_reply_shortcut: None,
+                effect: None,
+            })
+            .await
+        }?;
+
+        Ok(match updates {
+            tl::enums::Updates::UpdateShortSentMessage(_) => {
+                None
+            }
+            updates => Some(map_random_ids_to_messages(self, &[random_id], updates)
+                .pop()
+                .unwrap()
+                .unwrap()),
+        })
+    }
+
     /// Edits an existing message.
     ///
     /// Similar to [`Client::send_message`], advanced formatting can be achieved with the
