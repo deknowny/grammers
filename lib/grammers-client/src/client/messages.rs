@@ -632,10 +632,13 @@ impl Client {
             tl::enums::Updates::UpdateShortSentMessage(_) => {
                 None
             }
-            updates => Some(map_random_ids_to_messages(self, &[random_id], updates)
-                .pop()
-                .unwrap()
-                .unwrap()),
+            updates => {
+                if let Some(Some(unwrapped)) = map_random_ids_to_messages(self, &[random_id], updates).pop() {
+                    Some(unwrapped)
+                } else {
+                    None
+                }
+            },
         })
     }
 
