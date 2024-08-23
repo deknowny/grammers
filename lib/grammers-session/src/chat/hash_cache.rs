@@ -13,7 +13,7 @@ use std::collections::HashMap;
 pub struct ChatHashCache {
     // As far as I've observed, user, chat and channel IDs cannot collide,
     // but it will be an interesting moment if they ever do.
-    hash_map: HashMap<i64, (i64, PackedType)>,
+    pub hash_map: HashMap<i64, (i64, PackedType)>,
     self_id: Option<i64>,
     self_bot: bool,
 }
