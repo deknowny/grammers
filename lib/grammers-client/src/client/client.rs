@@ -120,17 +120,17 @@ pub struct InitParams {
     pub reconnection_policy: &'static dyn ReconnectionPolicy,
 }
 
-pub(crate) struct ClientInner {
+pub struct ClientInner {
     // Used to implement `PartialEq`.
     pub(crate) id: i64,
     pub(crate) config: Config,
     pub conn: Connection,
-    pub(crate) state: RwLock<ClientState>,
+    pub state: RwLock<ClientState>,
     // Stores per-datacenter downloader instances
     pub(crate) downloader_map: AsyncRwLock<HashMap<i32, Arc<Connection>>>,
 }
 
-pub(crate) struct ClientState {
+pub struct ClientState {
     pub(crate) dc_id: i32,
     pub(crate) message_box: MessageBox,
     pub chat_hashes: ChatHashCache,
@@ -140,7 +140,7 @@ pub(crate) struct ClientState {
     pub updates: VecDeque<(tl::enums::Update, Arc<crate::types::ChatMap>)>,
 }
 
-pub(crate) struct Connection {
+pub struct Connection {
     pub sender: AsyncMutex<Sender<transport::Full, mtp::Encrypted>>,
     pub request_tx: RwLock<Enqueuer>,
     pub(crate) step_counter: AtomicU32,
