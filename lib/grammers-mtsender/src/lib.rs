@@ -131,7 +131,7 @@ pub struct Sender<T: Transport, M: Mtp> {
     pub write_head: usize,
 }
 
-struct Request {
+pub struct Request {
     body: Vec<u8>,
     state: RequestState,
     result: oneshot::Sender<Result<Vec<u8>, InvocationError>>,
