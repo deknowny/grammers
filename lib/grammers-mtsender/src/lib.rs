@@ -119,16 +119,16 @@ pub struct Sender<T: Transport, M: Mtp> {
     addr: std::net::SocketAddr,
     #[cfg(feature = "proxy")]
     proxy_url: Option<String>,
-    requests: Vec<Request>,
+    pub requests: Vec<Request>,
     request_rx: mpsc::UnboundedReceiver<Request>,
     next_ping: Instant,
     reconnection_policy: &'static dyn ReconnectionPolicy,
 
     // Transport-level buffers and positions
-    read_buffer: Vec<u8>,
-    read_tail: usize,
-    write_buffer: DequeBuffer<u8>,
-    write_head: usize,
+    pub read_buffer: Vec<u8>,
+    pub read_tail: usize,
+    pub write_buffer: DequeBuffer<u8>,
+    pub write_head: usize,
 }
 
 struct Request {

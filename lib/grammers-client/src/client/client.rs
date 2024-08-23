@@ -124,7 +124,7 @@ pub(crate) struct ClientInner {
     // Used to implement `PartialEq`.
     pub(crate) id: i64,
     pub(crate) config: Config,
-    pub(crate) conn: Connection,
+    pub conn: Connection,
     pub(crate) state: RwLock<ClientState>,
     // Stores per-datacenter downloader instances
     pub(crate) downloader_map: AsyncRwLock<HashMap<i32, Arc<Connection>>>,
@@ -133,16 +133,16 @@ pub(crate) struct ClientInner {
 pub(crate) struct ClientState {
     pub(crate) dc_id: i32,
     pub(crate) message_box: MessageBox,
-    pub(crate) chat_hashes: ChatHashCache,
+    pub chat_hashes: ChatHashCache,
     // When did we last warn the user that the update queue filled up?
     // This is used to avoid spamming the log.
     pub(crate) last_update_limit_warn: Option<Instant>,
-    pub(crate) updates: VecDeque<(tl::enums::Update, Arc<crate::types::ChatMap>)>,
+    pub updates: VecDeque<(tl::enums::Update, Arc<crate::types::ChatMap>)>,
 }
 
 pub(crate) struct Connection {
-    pub(crate) sender: AsyncMutex<Sender<transport::Full, mtp::Encrypted>>,
-    pub(crate) request_tx: RwLock<Enqueuer>,
+    pub sender: AsyncMutex<Sender<transport::Full, mtp::Encrypted>>,
+    pub request_tx: RwLock<Enqueuer>,
     pub(crate) step_counter: AtomicU32,
 }
 
@@ -158,7 +158,7 @@ pub(crate) struct Connection {
 ///
 /// [`Session`]: grammers_session::Session
 #[derive(Clone)]
-pub struct Client(pub(crate) Arc<ClientInner>);
+pub struct Client(pub Arc<ClientInner>);
 
 impl Default for InitParams {
     fn default() -> Self {
