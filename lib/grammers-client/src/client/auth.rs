@@ -79,7 +79,7 @@ impl Client {
         }
     }
 
-    async fn complete_login(
+    pub async fn complete_login(
         &self,
         auth: tl::types::auth::Authorization,
     ) -> Result<User, InvocationError> {
@@ -322,7 +322,7 @@ impl Client {
 
     /// Extract information needed for the two-factor authentication
     /// It's called automatically when we get SESSION_PASSWORD_NEEDED error during sign in.
-    async fn get_password_information(&self) -> Result<PasswordToken, InvocationError> {
+    pub async fn get_password_information(&self) -> Result<PasswordToken, InvocationError> {
         let request = tl::functions::account::GetPassword {};
 
         let password: tl::types::account::Password = self.invoke(&request).await?.into();
