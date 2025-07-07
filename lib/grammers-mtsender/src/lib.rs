@@ -94,21 +94,19 @@ pub struct Sender<T: Transport, M: Mtp> {
     transport: T,
     mtp: M,
     addr: ServerAddr,
-    #[cfg(feature = "proxy")]
-    proxy_url: Option<String>,
-    pub requests: Vec<Request>,
+    requests: Vec<Request>,
     request_rx: mpsc::UnboundedReceiver<Request>,
     next_ping: Instant,
     reconnection_policy: &'static dyn ReconnectionPolicy,
 
     // Transport-level buffers and positions
-    pub read_buffer: Vec<u8>,
-    pub read_tail: usize,
-    pub write_buffer: DequeBuffer<u8>,
-    pub write_head: usize,
+    read_buffer: Vec<u8>,
+    read_tail: usize,
+    write_buffer: DequeBuffer<u8>,
+    write_head: usize,
 }
 
-pub struct Request {
+struct Request {
     body: Vec<u8>,
     state: RequestState,
     result: oneshot::Sender<Result<Vec<u8>, InvocationError>>,
