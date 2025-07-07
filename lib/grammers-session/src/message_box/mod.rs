@@ -794,7 +794,8 @@ impl MessageBoxes {
             trace!("requesting {:?}", gd);
             Some(gd)
         } else {
-            panic!("Should not try to get difference for an entry {key:?} without known state");
+            None
+            // panic!("Should not try to get difference for an entry {key:?} without known state");
         }
     }
 
