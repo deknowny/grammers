@@ -93,7 +93,7 @@ pub struct Sender<T: Transport, M: Mtp> {
     stream: NetStream,
     transport: T,
     mtp: M,
-    addr: std::net::SocketAddr,
+    addr: ServerAddr,
     #[cfg(feature = "proxy")]
     proxy_url: Option<String>,
     pub requests: Vec<Request>,

@@ -570,7 +570,7 @@ impl Client {
             tl::enums::Updates::UpdateShortSentMessage(updates) => {
                 Message::from_raw_short_updates(self, updates, message, chat)
             }
-            updates => map_random_ids_to_messages(self, &[random_id], updates)
+            updates => map_random_ids_to_messages(self, chat.to_peer(), &[random_id], updates)
                 .pop()
                 .unwrap()
                 .unwrap(),
@@ -728,6 +728,7 @@ impl Client {
                 invert_media: false,
                 quick_reply_shortcut: None,
                 effect: None,
+                allow_paid_floodskip: false,
             })
             .await
         } else {
@@ -759,6 +760,7 @@ impl Client {
                 invert_media: false,
                 quick_reply_shortcut: None,
                 effect: None,
+                allow_paid_floodskip: false,
             })
             .await
         }?;
@@ -768,11 +770,7 @@ impl Client {
                 None
             }
             updates => {
-                if let Some(Some(unwrapped)) = map_random_ids_to_messages(self, &[random_id], updates).pop() {
-                    Some(unwrapped)
-                } else {
-                    None
-                }
+                None
             },
         })
     }

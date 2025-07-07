@@ -5,7 +5,7 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use grammers_mtproto::mtp;
+use grammers_mtproto::{mtp, transport};
 use grammers_mtsender::{self as sender, ReconnectionPolicy, Sender, ServerAddr};
 use grammers_session::{ChatHashCache, MessageBoxes, Session, State};
 use grammers_tl_types as tl;
@@ -17,7 +17,6 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 use web_time::Instant;
 
-use super::net;
 
 /// When no locale is found, use this one instead.
 const DEFAULT_LOCALE: &str = "en";
@@ -135,7 +134,7 @@ pub struct ClientState {
     // When did we last warn the user that the update queue filled up?
     // This is used to avoid spamming the log.
     pub(crate) last_update_limit_warn: Option<Instant>,
-    pub updates: VecDeque<(tl::enums::Update, Arc<crate::types::ChatMap>)>,
+    pub updates: VecDeque<(tl::enums::Update, State, Arc<crate::types::ChatMap>)>,
 }
 
 pub struct Connection {
