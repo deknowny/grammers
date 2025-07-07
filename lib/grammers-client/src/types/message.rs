@@ -5,22 +5,23 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+use crate::ChatMap;
 #[cfg(any(feature = "markdown", feature = "html"))]
 use crate::parsers;
 use crate::types::reactions::InputReactions;
-use crate::types::{Downloadable, InputMessage, Media, Photo};
-use crate::utils;
-use crate::ChatMap;
-use crate::{types, Client};
+use crate::types::{InputMessage, Media, Photo};
+use crate::{Client, types};
+use crate::{InputMedia, utils};
 use chrono::{DateTime, Utc};
 use grammers_mtsender::InvocationError;
 use grammers_session::PackedChat;
 use grammers_tl_types as tl;
 use std::fmt;
-use std::io;
-use std::path::Path;
 use std::sync::Arc;
 use types::Chat;
+
+#[cfg(feature = "fs")]
+use std::{io, path::Path};
 
 /// Represents a Telegram message, which includes text messages, messages with media, and service
 /// messages.
@@ -29,12 +30,8 @@ use types::Chat;
 /// using this object, those changes won't alter this structure.
 #[derive(Clone)]
 pub struct Message {
-    // Message services are a trimmed-down version of normal messages, but with `action`.
-    //
-    // Using `enum` just for that would clutter all methods with `match`, so instead service
-    // messages are interpreted as messages and their action stored separatedly.
-    pub raw: tl::types::Message,
-    pub raw_action: Option<tl::enums::MessageAction>,
+    pub raw: tl::enums::Message,
+    pub(crate) fetched_in: Option<tl::enums::Peer>,
     pub(crate) client: Client,
     // When fetching messages or receiving updates, a set of chats will be present. A single
     // server response contains a lot of chats, and some might be related to deep layers of
@@ -47,62 +44,14 @@ impl Message {
     pub fn from_raw(
         client: &Client,
         message: tl::enums::Message,
+        fetched_in: Option<tl::enums::Peer>,
         chats: &Arc<ChatMap>,
-    ) -> Option<Self> {
-        match message {
-            // Don't even bother to expose empty messages to the user, even if they have an ID.
-            tl::enums::Message::Empty(_) => None,
-            tl::enums::Message::Message(msg) => Some(Message {
-                raw: msg,
-                raw_action: None,
-                client: client.clone(),
-                chats: Arc::clone(chats),
-            }),
-            tl::enums::Message::Service(msg) => Some(Message {
-                raw: tl::types::Message {
-                    out: msg.out,
-                    mentioned: msg.mentioned,
-                    media_unread: msg.media_unread,
-                    silent: msg.silent,
-                    post: msg.post,
-                    from_scheduled: false,
-                    legacy: msg.legacy,
-                    edit_hide: false,
-                    pinned: false,
-                    noforwards: false,
-                    invert_media: false,
-                    id: msg.id,
-                    from_id: msg.from_id,
-                    from_boosts_applied: None,
-                    peer_id: msg.peer_id,
-                    saved_peer_id: None,
-                    fwd_from: None,
-                    via_bot_id: None,
-                    reply_to: msg.reply_to,
-                    date: msg.date,
-                    message: String::new(),
-                    media: None,
-                    reply_markup: None,
-                    entities: None,
-                    views: None,
-                    forwards: None,
-                    replies: None,
-                    edit_date: None,
-                    post_author: None,
-                    grouped_id: None,
-                    restriction_reason: None,
-                    ttl_period: msg.ttl_period,
-                    reactions: None,
-                    quick_reply_shortcut_id: None,
-                    via_business_bot_id: None,
-                    offline: false,
-                    effect: None,
-                    factcheck: None,
-                },
-                raw_action: Some(msg.action),
-                client: client.clone(),
-                chats: Arc::clone(chats),
-            }),
+    ) -> Self {
+        Self {
+            raw: message,
+            fetched_in,
+            client: client.clone(),
+            chats: Arc::clone(chats),
         }
     }
 
@@ -113,7 +62,7 @@ impl Message {
         chat: PackedChat,
     ) -> Self {
         Self {
-            raw: tl::types::Message {
+            raw: tl::enums::Message::Message(tl::types::Message {
                 out: updates.out,
                 mentioned: false,
                 media_unread: false,
@@ -124,6 +73,7 @@ impl Message {
                 edit_hide: false,
                 pinned: false,
                 noforwards: false, // TODO true if channel has noforwads?
+                video_processing_pending: false,
                 invert_media: input.invert_media,
                 id: updates.id,
                 from_id: None, // TODO self
@@ -167,8 +117,9 @@ impl Message {
                 offline: false,
                 effect: None,
                 factcheck: None,
-            },
-            raw_action: None,
+                report_delivery_until_date: None,
+            }),
+            fetched_in: None,
             client: client.clone(),
             chats: ChatMap::single(Chat::unpack(chat)),
         }
@@ -177,7 +128,11 @@ impl Message {
     /// Whether the message is outgoing (i.e. you sent this message to some other chat) or
     /// incoming (i.e. someone else sent it to you or the chat).
     pub fn outgoing(&self) -> bool {
-        self.raw.out
+        match &self.raw {
+            tl::enums::Message::Empty(_) => false,
+            tl::enums::Message::Message(message) => message.out,
+            tl::enums::Message::Service(message) => message.out,
+        }
     }
 
     /// Whether you were mentioned in this message or not.
@@ -185,29 +140,49 @@ impl Message {
     /// This includes @username mentions, text mentions, and messages replying to one of your
     /// previous messages (even if it contains no mention in the message text).
     pub fn mentioned(&self) -> bool {
-        self.raw.mentioned
+        match &self.raw {
+            tl::enums::Message::Empty(_) => false,
+            tl::enums::Message::Message(message) => message.mentioned,
+            tl::enums::Message::Service(message) => message.mentioned,
+        }
     }
 
     /// Whether you have read the media in this message or not.
     ///
     /// Most commonly, these are voice notes that you have not played yet.
     pub fn media_unread(&self) -> bool {
-        self.raw.media_unread
+        match &self.raw {
+            tl::enums::Message::Empty(_) => false,
+            tl::enums::Message::Message(message) => message.media_unread,
+            tl::enums::Message::Service(message) => message.media_unread,
+        }
     }
 
     /// Whether the message should notify people with sound or not.
     pub fn silent(&self) -> bool {
-        self.raw.silent
+        match &self.raw {
+            tl::enums::Message::Empty(_) => false,
+            tl::enums::Message::Message(message) => message.silent,
+            tl::enums::Message::Service(message) => message.silent,
+        }
     }
 
     /// Whether this message is a post in a broadcast channel or not.
     pub fn post(&self) -> bool {
-        self.raw.post
+        match &self.raw {
+            tl::enums::Message::Empty(_) => false,
+            tl::enums::Message::Message(message) => message.post,
+            tl::enums::Message::Service(message) => message.post,
+        }
     }
 
     /// Whether this message was originated from a previously-scheduled message or not.
     pub fn from_scheduled(&self) -> bool {
-        self.raw.from_scheduled
+        match &self.raw {
+            tl::enums::Message::Empty(_) => false,
+            tl::enums::Message::Message(message) => message.from_scheduled,
+            tl::enums::Message::Service(_) => false,
+        }
     }
 
     // `legacy` is not exposed, though it can be if it proves to be useful
@@ -215,12 +190,20 @@ impl Message {
     /// Whether the edited mark of this message is edited should be hidden (e.g. in GUI clients)
     /// or shown.
     pub fn edit_hide(&self) -> bool {
-        self.raw.edit_hide
+        match &self.raw {
+            tl::enums::Message::Empty(_) => false,
+            tl::enums::Message::Message(message) => message.edit_hide,
+            tl::enums::Message::Service(_) => false,
+        }
     }
 
     /// Whether this message is currently pinned or not.
     pub fn pinned(&self) -> bool {
-        self.raw.pinned
+        match &self.raw {
+            tl::enums::Message::Empty(_) => false,
+            tl::enums::Message::Message(message) => message.pinned,
+            tl::enums::Message::Service(_) => false,
+        }
     }
 
     /// The ID of this message.
@@ -241,24 +224,40 @@ impl Message {
     /// [`Client::delete_messages`], which **cannot** validate the chat where the message
     /// should be deleted for those cases.
     pub fn id(&self) -> i32 {
-        self.raw.id
+        self.raw.id()
+    }
+
+    pub(crate) fn peer_id(&self) -> &tl::enums::Peer {
+        utils::peer_from_message(&self.raw)
+            .or_else(|| self.fetched_in.as_ref())
+            .expect("empty messages from updates should contain peer_id")
     }
 
     /// The sender of this message, if any.
     pub fn sender(&self) -> Option<types::Chat> {
-        self.raw
-            .from_id
-            .as_ref()
+        let from_id = match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.from_id.as_ref(),
+            tl::enums::Message::Service(message) => message.from_id.as_ref(),
+        };
+        from_id
+            .cloned()
             .or({
                 // Incoming messages in private conversations don't include `from_id` since
                 // layer 119, but the sender can only be the chat we're in.
-                if !self.raw.out && matches!(self.raw.peer_id, tl::enums::Peer::User(_)) {
-                    Some(&self.raw.peer_id)
+                let peer_id = self.peer_id();
+                if matches!(peer_id, tl::enums::Peer::User(_)) {
+                    if self.outgoing() {
+                        Some(peer_id.clone())
+                    } else {
+                        let user_id = self.client.0.state.read().unwrap().chat_hashes.self_id();
+                        Some(tl::types::PeerUser { user_id }.into())
+                    }
                 } else {
                     None
                 }
             })
-            .map(|from| utils::always_find_entity(from, &self.chats, &self.client))
+            .map(|from| utils::always_find_entity(&from, &self.chats, &self.client))
     }
 
     /// The chat where this message was sent to.
@@ -266,38 +265,70 @@ impl Message {
     /// This might be the user you're talking to for private conversations, or the group or
     /// channel where the message was sent.
     pub fn chat(&self) -> types::Chat {
-        utils::always_find_entity(&self.raw.peer_id, &self.chats, &self.client)
+        utils::always_find_entity(self.peer_id(), &self.chats, &self.client)
     }
 
     /// If this message was forwarded from a previous message, return the header with information
     /// about that forward.
     pub fn forward_header(&self) -> Option<tl::enums::MessageFwdHeader> {
-        self.raw.fwd_from.clone()
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.fwd_from.clone(),
+            tl::enums::Message::Service(_) => None,
+        }
     }
 
     /// If this message was sent @via some inline bot, return the bot's user identifier.
     pub fn via_bot_id(&self) -> Option<i64> {
-        self.raw.via_bot_id
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.via_bot_id,
+            tl::enums::Message::Service(_) => None,
+        }
     }
 
     /// If this message is replying to a previous message, return the header with information
     /// about that reply.
     pub fn reply_header(&self) -> Option<tl::enums::MessageReplyHeader> {
-        self.raw.reply_to.clone()
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.reply_to.clone(),
+            tl::enums::Message::Service(message) => message.reply_to.clone(),
+        }
+    }
+
+    pub(crate) fn date_timestamp(&self) -> i32 {
+        match &self.raw {
+            tl::enums::Message::Empty(_) => 0,
+            tl::enums::Message::Message(message) => message.date,
+            tl::enums::Message::Service(message) => message.date,
+        }
     }
 
     /// The date when this message was produced.
     pub fn date(&self) -> DateTime<Utc> {
-        utils::date(self.raw.date)
+        utils::date(self.date_timestamp())
     }
 
     /// The message's text.
     ///
-    /// For service messages, this will be the empty strings.
+    /// For service or empty messages, this will be the empty strings.
     ///
     /// If the message has media, this text is the caption commonly displayed underneath it.
     pub fn text(&self) -> &str {
-        &self.raw.message
+        match &self.raw {
+            tl::enums::Message::Empty(_) => "",
+            tl::enums::Message::Message(message) => &message.message,
+            tl::enums::Message::Service(_) => "",
+        }
+    }
+
+    fn entities(&self) -> Option<&Vec<tl::enums::MessageEntity>> {
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.entities.as_ref(),
+            tl::enums::Message::Service(_) => None,
+        }
     }
 
     /// Like [`text`](Self::text), but with the [`fmt_entities`](Self::fmt_entities)
@@ -311,10 +342,10 @@ impl Message {
     /// such as underline, are also ignored.
     #[cfg(feature = "markdown")]
     pub fn markdown_text(&self) -> String {
-        if let Some(entities) = self.raw.entities.as_ref() {
-            parsers::generate_markdown_message(&self.raw.message, entities)
+        if let Some(entities) = self.entities() {
+            parsers::generate_markdown_message(self.text(), entities)
         } else {
-            self.raw.message.clone()
+            self.text().to_owned()
         }
     }
 
@@ -326,10 +357,10 @@ impl Message {
     /// sent for Telegram to include them in the message.
     #[cfg(feature = "html")]
     pub fn html_text(&self) -> String {
-        if let Some(entities) = self.raw.entities.as_ref() {
-            parsers::generate_html_message(&self.raw.message, entities)
+        if let Some(entities) = self.entities() {
+            parsers::generate_html_message(self.text(), entities)
         } else {
-            self.raw.message.clone()
+            self.text().to_owned()
         }
     }
 
@@ -338,20 +369,29 @@ impl Message {
     /// This not only includes photos or videos, but also contacts, polls, documents, locations
     /// and many other types.
     pub fn media(&self) -> Option<types::Media> {
-        self.raw.media.clone().and_then(|x| Media::from_raw(x))
+        let media = match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.media.clone(),
+            tl::enums::Message::Service(_) => None,
+        };
+        media.and_then(Media::from_raw)
     }
 
     /// If the message has a reply markup (which can happen for messages produced by bots),
     /// returns said markup.
     pub fn reply_markup(&self) -> Option<tl::enums::ReplyMarkup> {
-        self.raw.reply_markup.clone()
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.reply_markup.clone(),
+            tl::enums::Message::Service(_) => None,
+        }
     }
 
     /// The formatting entities used to format this message, such as bold, italic, with their
     /// offsets and lengths.
     pub fn fmt_entities(&self) -> Option<&Vec<tl::enums::MessageEntity>> {
         // TODO correct the offsets and lengths to match the byte offsets
-        self.raw.entities.as_ref()
+        self.entities()
     }
 
     /// How many views does this message have, when applicable.
@@ -359,22 +399,30 @@ impl Message {
     /// The same user account can contribute to increment this counter indefinitedly, however
     /// there is a server-side cooldown limitting how fast it can happen (several hours).
     pub fn view_count(&self) -> Option<i32> {
-        self.raw.views
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.views,
+            tl::enums::Message::Service(_) => None,
+        }
     }
 
     /// How many times has this message been forwarded, when applicable.
     pub fn forward_count(&self) -> Option<i32> {
-        self.raw.forwards
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.forwards,
+            tl::enums::Message::Service(_) => None,
+        }
     }
 
     /// How many replies does this message have, when applicable.
     pub fn reply_count(&self) -> Option<i32> {
-        match &self.raw.replies {
-            None => None,
-            Some(replies) => {
-                let tl::enums::MessageReplies::Replies(replies) = replies;
-                Some(replies.replies)
-            }
+        match &self.raw {
+            tl::enums::Message::Message(tl::types::Message {
+                replies: Some(tl::enums::MessageReplies::Replies(replies)),
+                ..
+            }) => Some(replies.replies),
+            _ => None,
         }
     }
 
@@ -401,22 +449,34 @@ impl Message {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// Remove reactions
+    ///
+    /// ```
+    /// # async fn f(message: grammers_client::types::Message, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use grammers_client::types::InputReactions;
+    ///
+    /// message.react(InputReactions::remove()).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn react<R: Into<InputReactions>>(
         &self,
         reactions: R,
     ) -> Result<(), InvocationError> {
         self.client
-            .send_reaction(self.chat(), self.id(), reactions)
+            .send_reactions(self.chat(), self.id(), reactions)
             .await?;
         Ok(())
     }
 
     /// How many reactions does this message have, when applicable.
     pub fn reaction_count(&self) -> Option<i32> {
-        match &self.raw.reactions {
-            None => None,
-            Some(reactions) => {
-                let tl::enums::MessageReactions::Reactions(reactions) = reactions;
+        match &self.raw {
+            tl::enums::Message::Message(tl::types::Message {
+                reactions: Some(tl::enums::MessageReactions::Reactions(reactions)),
+                ..
+            }) => {
                 let count = reactions
                     .results
                     .iter()
@@ -427,17 +487,26 @@ impl Message {
                     .sum();
                 Some(count)
             }
+            _ => None,
         }
     }
 
     /// The date when this message was last edited.
     pub fn edit_date(&self) -> Option<DateTime<Utc>> {
-        self.raw.edit_date.map(utils::date)
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.edit_date.map(utils::date),
+            tl::enums::Message::Service(_) => None,
+        }
     }
 
     /// If this message was sent to a channel, return the name used by the author to post it.
     pub fn post_author(&self) -> Option<&str> {
-        self.raw.post_author.as_ref().map(|author| author.as_ref())
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.post_author.as_deref(),
+            tl::enums::Message::Service(_) => None,
+        }
     }
 
     /// If this message belongs to a group of messages, return the unique identifier for that
@@ -447,27 +516,41 @@ impl Message {
     ///
     /// Note that there may be messages sent in between the messages forming a group.
     pub fn grouped_id(&self) -> Option<i64> {
-        self.raw.grouped_id
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.grouped_id,
+            tl::enums::Message::Service(_) => None,
+        }
     }
 
     /// A list of reasons on why this message is restricted.
     ///
     /// The message is not restricted if the return value is `None`.
     pub fn restriction_reason(&self) -> Option<&Vec<tl::enums::RestrictionReason>> {
-        self.raw.restriction_reason.as_ref()
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(message) => message.restriction_reason.as_ref(),
+            tl::enums::Message::Service(_) => None,
+        }
     }
 
     /// If this message is a service message, return the service action that occured.
     pub fn action(&self) -> Option<&tl::enums::MessageAction> {
-        self.raw_action.as_ref()
+        match &self.raw {
+            tl::enums::Message::Empty(_) => None,
+            tl::enums::Message::Message(_) => None,
+            tl::enums::Message::Service(message) => Some(&message.action),
+        }
     }
 
     /// If this message is replying to another message, return the replied message ID.
     pub fn reply_to_message_id(&self) -> Option<i32> {
-        if let Some(tl::enums::MessageReplyHeader::Header(m)) = &self.raw.reply_to {
-            m.reply_to_msg_id
-        } else {
-            None
+        match &self.raw {
+            tl::enums::Message::Message(tl::types::Message {
+                reply_to: Some(tl::enums::MessageReplyHeader::Header(header)),
+                ..
+            }) => header.reply_to_msg_id,
+            _ => None,
         }
     }
 
@@ -493,6 +576,17 @@ impl Message {
         self.client.send_message(&self.chat(), message).await
     }
 
+    /// Respond to this message by sending a album in the same chat, but without directly
+    /// replying to it.
+    ///
+    /// Shorthand for `Client::send_album`.
+    pub async fn respond_album(
+        &self,
+        medias: Vec<InputMedia>,
+    ) -> Result<Vec<Option<Self>>, InvocationError> {
+        self.client.send_album(&self.chat(), medias).await
+    }
+
     /// Directly reply to this message by sending a new message in the same chat that replies to
     /// it. This methods overrides the `reply_to` on the `InputMessage` to point to `self`.
     ///
@@ -500,8 +594,20 @@ impl Message {
     pub async fn reply<M: Into<InputMessage>>(&self, message: M) -> Result<Self, InvocationError> {
         let message = message.into();
         self.client
-            .send_message(&self.chat(), message.reply_to(Some(self.raw.id)))
+            .send_message(&self.chat(), message.reply_to(Some(self.id())))
             .await
+    }
+
+    /// Directly reply to this message by sending a album in the same chat that replies to
+    /// it. This methods overrides the `reply_to` on the first `InputMedia` to point to `self`.
+    ///
+    /// Shorthand for `Client::send_album`.
+    pub async fn reply_album(
+        &self,
+        mut medias: Vec<InputMedia>,
+    ) -> Result<Vec<Option<Self>>, InvocationError> {
+        medias.first_mut().unwrap().reply_to = Some(self.id());
+        self.client.send_album(&self.chat(), medias).await
     }
 
     /// Forward this message to another (or the same) chat.
@@ -513,7 +619,7 @@ impl Message {
         // When forwarding a single message, if it fails, Telegram should respond with RPC error.
         // If it succeeds we will have the single forwarded message present which we can unwrap.
         self.client
-            .forward_messages(chat, &[self.raw.id], &self.chat())
+            .forward_messages(chat, &[self.id()], &self.chat())
             .await
             .map(|mut msgs| msgs.pop().unwrap().unwrap())
     }
@@ -523,7 +629,7 @@ impl Message {
     /// Shorthand for `Client::edit_message`.
     pub async fn edit<M: Into<InputMessage>>(&self, new_message: M) -> Result<(), InvocationError> {
         self.client
-            .edit_message(&self.chat(), self.raw.id, new_message)
+            .edit_message(&self.chat(), self.id(), new_message)
             .await
     }
 
@@ -533,7 +639,7 @@ impl Message {
     /// at once, consider using that method instead.
     pub async fn delete(&self) -> Result<(), InvocationError> {
         self.client
-            .delete_messages(&self.chat(), &[self.raw.id])
+            .delete_messages(&self.chat(), &[self.id()])
             .await
             .map(drop)
     }
@@ -548,7 +654,7 @@ impl Message {
             self.client
                 .invoke(&tl::functions::channels::ReadHistory {
                     channel,
-                    max_id: self.raw.id,
+                    max_id: self.id(),
                 })
                 .await
                 .map(drop)
@@ -556,7 +662,7 @@ impl Message {
             self.client
                 .invoke(&tl::functions::messages::ReadHistory {
                     peer: chat.to_input_peer(),
-                    max_id: self.raw.id,
+                    max_id: self.id(),
                 })
                 .await
                 .map(drop)
@@ -567,14 +673,14 @@ impl Message {
     ///
     /// Shorthand for `Client::pin_message`.
     pub async fn pin(&self) -> Result<(), InvocationError> {
-        self.client.pin_message(&self.chat(), self.raw.id).await
+        self.client.pin_message(&self.chat(), self.id()).await
     }
 
     /// Unpin this message from the chat.
     ///
     /// Shorthand for `Client::unpin_message`.
     pub async fn unpin(&self) -> Result<(), InvocationError> {
-        self.client.unpin_message(&self.chat(), self.raw.id).await
+        self.client.unpin_message(&self.chat(), self.id()).await
     }
 
     /// Refetch this message, mutating all of its properties in-place.
@@ -586,7 +692,7 @@ impl Message {
         // When fetching a single message, if it fails, Telegram should respond with RPC error.
         // If it succeeds we will have the single message present which we can unwrap.
         self.client
-            .get_messages_by_id(&self.chat(), &[self.raw.id])
+            .get_messages_by_id(&self.chat(), &[self.id()])
             .await?
             .pop()
             .unwrap()
@@ -599,13 +705,11 @@ impl Message {
     /// Returns `true` if there was media to download, or `false` otherwise.
     ///
     /// Shorthand for `Client::download_media`.
+    #[cfg(feature = "fs")]
     pub async fn download_media<P: AsRef<Path>>(&self, path: P) -> Result<bool, io::Error> {
         // TODO probably encode failed download in error
         if let Some(media) = self.media() {
-            self.client
-                .download_media(&Downloadable::Media(media), path)
-                .await
-                .map(|_| true)
+            self.client.download_media(&media, path).await.map(|_| true)
         } else {
             Ok(false)
         }

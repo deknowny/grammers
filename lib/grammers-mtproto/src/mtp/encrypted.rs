@@ -9,13 +9,13 @@ use super::{
     Deserialization, DeserializationFailure, DeserializeError, Mtp, RpcResult, RpcResultError,
 };
 use crate::utils::StackBuffer;
-use crate::{manual_tl, MsgId};
+use crate::{MsgId, manual_tl};
 use getrandom::getrandom;
-use grammers_crypto::{decrypt_data_v2, encrypt_data_v2, AuthKey, DequeBuffer};
+use grammers_crypto::{AuthKey, DequeBuffer, decrypt_data_v2, encrypt_data_v2};
 use grammers_tl_types::{self as tl, Cursor, Deserializable, Identifiable, Serializable};
 use log::info;
 use std::mem;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// How many future salts to fetch or have stored at a given time.
 ///
@@ -72,7 +72,7 @@ pub struct Encrypted {
     start_salt_time: Option<(i32, Instant)>,
 
     /// Internal request for salts which should not be propagated.
-    salt_request_msg_id: Option<i64>,
+    salt_request_msg_id: Option<MsgId>,
 
     /// The secure, random identifier for this instance.
     client_id: i64,
@@ -239,14 +239,12 @@ impl Encrypted {
             // This would break, because we couldn't identify the response.
             //
             // So salts are only requested once we have a valid salt to reduce the chances of this happening.
-            if self.salts.len() == 1 {
-                info!("only one future salt remaining; asking for more salts");
-            }
+            info!("only one future salt remaining; asking for more salts");
             let body = tl::functions::GetFutureSalts {
                 num: NUM_FUTURE_SALTS,
             }
             .to_bytes();
-            self.serialize_msg(buffer, &body, true);
+            self.salt_request_msg_id = Some(self.serialize_msg(buffer, &body, true));
         }
     }
 
@@ -485,7 +483,7 @@ impl Encrypted {
                 let body = match manual_tl::GzipPacked::from_bytes(&result) {
                     Ok(gzip) => match gzip.decompress() {
                         Ok(x) => {
-                            self.store_own_updates(&x);
+                            self.store_own_updates(msg_id, &x);
                             Ok(x)
                         }
                         Err(e) => Err(e),
@@ -503,7 +501,7 @@ impl Encrypted {
                 }
             }
             _ => {
-                self.store_own_updates(&result);
+                self.store_own_updates(msg_id, &result);
                 self.deserialization
                     .push(Deserialization::RpcResult(RpcResult {
                         msg_id,
@@ -520,13 +518,18 @@ impl Encrypted {
     ///
     /// Users may also be interested in handling updates produced by the client as if they were
     /// like any other.
-    fn store_own_updates(&mut self, body: &[u8]) {
+    ///
+    /// This MUST be done before storing the [`Deserialization::RpcResult`],
+    /// because the stored update might need to reference the request, which
+    /// must not have been dropped yet.
+    fn store_own_updates(&mut self, msg_id: MsgId, body: &[u8]) {
         match u32::from_bytes(body) {
             Ok(body_id) => {
                 if UPDATE_IDS.iter().any(|&id| body_id == id) {
-                    // TODO somehow signal that this updates is our own, to avoid getting into nasty loops
-                    self.deserialization
-                        .push(Deserialization::Update(body.to_vec()));
+                    self.deserialization.push(Deserialization::OwnUpdate {
+                        msg_id,
+                        update: body.to_vec(),
+                    });
                 }
             }
             Err(_err) => {
@@ -644,7 +647,7 @@ impl Encrypted {
 
         if self
             .salt_request_msg_id
-            .is_some_and(|msg_id| msg_id == bad_msg.bad_msg_id())
+            .is_some_and(|msg_id| msg_id == MsgId(bad_msg.bad_msg_id()))
         {
             // Response to internal request, do not propagate.
             self.salt_request_msg_id = None;
@@ -881,7 +884,7 @@ impl Encrypted {
 
         if self
             .salt_request_msg_id
-            .is_some_and(|msg_id| msg_id == salts.req_msg_id)
+            .is_some_and(|msg_id| msg_id == MsgId(salts.req_msg_id))
         {
             // Response to internal request, do not propagate.
             self.salt_request_msg_id = None;
@@ -1306,6 +1309,7 @@ impl Mtp for Encrypted {
         self.last_msg_id = 0;
         self.pending_ack.clear();
         self.msg_count = 0;
+        self.salt_request_msg_id = None;
     }
 }
 

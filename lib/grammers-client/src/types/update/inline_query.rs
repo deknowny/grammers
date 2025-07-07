@@ -7,8 +7,9 @@
 // except according to those terms.
 
 use super::super::{Chat, ChatMap, User};
-use crate::{client::Client, utils::generate_random_id, InputMessage};
+use crate::{InputMessage, client::Client, utils::generate_random_id};
 use grammers_mtsender::InvocationError;
+use grammers_session::State;
 use grammers_tl_types as tl;
 use std::fmt;
 use std::sync::Arc;
@@ -17,9 +18,10 @@ use std::sync::Arc;
 /// inline query such as `@bot query`.
 #[derive(Clone)]
 pub struct InlineQuery {
-    raw: tl::types::UpdateBotInlineQuery,
-    client: Client,
-    chats: Arc<ChatMap>,
+    pub raw: tl::enums::Update,
+    pub state: State,
+    pub(crate) client: Client,
+    pub(crate) chats: Arc<ChatMap>,
 }
 
 /// An inline query answer builder.
@@ -41,25 +43,20 @@ impl From<InlineResult> for tl::enums::InputBotInlineResult {
 }
 
 impl InlineQuery {
-    pub fn from_raw(
-        client: &Client,
-        query: tl::types::UpdateBotInlineQuery,
-        chats: &Arc<ChatMap>,
-    ) -> Self {
-        Self {
-            raw: query,
-            client: client.clone(),
-            chats: chats.clone(),
+    fn update(&self) -> &tl::types::UpdateBotInlineQuery {
+        match &self.raw {
+            tl::enums::Update::BotInlineQuery(update) => update,
+            _ => unreachable!(),
         }
     }
 
-    ///	User that sent the query
+    /// User that sent the query
     pub fn sender(&self) -> &User {
         match self
             .chats
             .get(
                 &tl::types::PeerUser {
-                    user_id: self.raw.user_id,
+                    user_id: self.update().user_id,
                 }
                 .into(),
             )
@@ -72,22 +69,25 @@ impl InlineQuery {
 
     /// The text of the inline query.
     pub fn text(&self) -> &str {
-        self.raw.query.as_str()
+        self.update().query.as_str()
     }
 
     /// The offset of the inline query.
     pub fn offset(&self) -> &str {
-        self.raw.offset.as_str()
+        self.update().offset.as_str()
     }
 
     /// Answer the inline query.
     // TODO: add example
-    pub fn answer(&self, results: impl IntoIterator<Item = InlineResult>) -> Answer {
+    pub fn answer<T>(&self, results: impl IntoIterator<Item = T>) -> Answer
+    where
+        T: Into<tl::enums::InputBotInlineResult>,
+    {
         Answer {
             request: tl::functions::messages::SetInlineBotResults {
                 gallery: false,
                 private: false,
-                query_id: self.raw.query_id,
+                query_id: self.update().query_id,
                 results: results.into_iter().map(Into::into).collect(),
                 cache_time: 0,
                 next_offset: None,
@@ -100,12 +100,12 @@ impl InlineQuery {
 
     /// Type of the chat from which the inline query was sent.
     pub fn peer_type(&self) -> Option<tl::enums::InlineQueryPeerType> {
-        self.raw.peer_type.clone()
+        self.update().peer_type.clone()
     }
 
     /// Query ID
     pub fn query_id(&self) -> i64 {
-        self.raw.query_id
+        self.update().query_id
     }
 }
 
@@ -206,36 +206,40 @@ impl Article {
 
 impl From<Article> for InlineResult {
     fn from(article: Article) -> Self {
-        Self(tl::enums::InputBotInlineResult::Result(
-            tl::types::InputBotInlineResult {
-                id: article
-                    .id
-                    .unwrap_or_else(|| generate_random_id().to_string()),
-                r#type: "article".into(),
-                title: Some(article.title),
-                description: article.description,
-                url: article.url,
-                thumb: article.thumb_url.map(|url| {
-                    tl::enums::InputWebDocument::Document(tl::types::InputWebDocument {
-                        url,
-                        size: 0,
-                        mime_type: "image/jpeg".into(),
-                        attributes: vec![],
-                    })
-                }),
-                content: None,
-                // TODO: also allow other types of messages than text
-                send_message: tl::enums::InputBotInlineMessage::Text(
-                    tl::types::InputBotInlineMessageText {
-                        no_webpage: !article.input_message.link_preview,
-                        invert_media: article.input_message.invert_media,
-                        message: article.input_message.text,
-                        entities: Some(article.input_message.entities),
-                        reply_markup: article.input_message.reply_markup,
-                    },
-                ),
-            },
-        ))
+        Self(article.into())
+    }
+}
+
+impl From<Article> for tl::enums::InputBotInlineResult {
+    fn from(article: Article) -> Self {
+        tl::enums::InputBotInlineResult::Result(tl::types::InputBotInlineResult {
+            id: article
+                .id
+                .unwrap_or_else(|| generate_random_id().to_string()),
+            r#type: "article".into(),
+            title: Some(article.title),
+            description: article.description,
+            url: article.url,
+            thumb: article.thumb_url.map(|url| {
+                tl::enums::InputWebDocument::Document(tl::types::InputWebDocument {
+                    url,
+                    size: 0,
+                    mime_type: "image/jpeg".into(),
+                    attributes: vec![],
+                })
+            }),
+            content: None,
+            // TODO: also allow other types of messages than text
+            send_message: tl::enums::InputBotInlineMessage::Text(
+                tl::types::InputBotInlineMessageText {
+                    no_webpage: !article.input_message.link_preview,
+                    invert_media: article.input_message.invert_media,
+                    message: article.input_message.text,
+                    entities: Some(article.input_message.entities),
+                    reply_markup: article.input_message.reply_markup,
+                },
+            ),
+        })
     }
 }
 

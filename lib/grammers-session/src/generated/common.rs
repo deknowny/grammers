@@ -6,5 +6,4 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-pub mod query;
-pub mod send;
+include!(concat!(env!("OUT_DIR"), "/generated_common.rs"));

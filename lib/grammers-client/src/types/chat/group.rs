@@ -94,15 +94,15 @@ impl Group {
     /// Return the title of this group.
     ///
     /// The title may be the empty string if the group is not accessible.
-    pub fn title(&self) -> &str {
+    pub fn title(&self) -> Option<&str> {
         use tl::enums::Chat;
 
         match &self.raw {
-            Chat::Empty(_) => "",
-            Chat::Chat(chat) => chat.title.as_str(),
-            Chat::Forbidden(chat) => chat.title.as_str(),
-            Chat::Channel(chat) => chat.title.as_str(),
-            Chat::ChannelForbidden(chat) => chat.title.as_str(),
+            Chat::Empty(_) => None,
+            Chat::Chat(chat) => Some(chat.title.as_str()),
+            Chat::Forbidden(chat) => Some(chat.title.as_str()),
+            Chat::Channel(chat) => Some(chat.title.as_str()),
+            Chat::ChannelForbidden(chat) => Some(chat.title.as_str()),
         }
     }
 
@@ -118,6 +118,37 @@ impl Group {
         match &self.raw {
             Chat::Empty(_) | Chat::Chat(_) | Chat::Forbidden(_) | Chat::ChannelForbidden(_) => None,
             Chat::Channel(channel) => channel.username.as_deref(),
+        }
+    }
+
+    /// Return collectible usernames of this chat, if any.
+    ///
+    /// The returned usernames do not contain the "@" prefix.
+    ///
+    /// Outside of the application, people may link to this user with one of its username, such
+    /// as https://t.me/username.
+    pub fn usernames(&self) -> Vec<&str> {
+        use tl::enums::Chat;
+
+        match &self.raw {
+            Chat::Empty(_) | Chat::Chat(_) | Chat::Forbidden(_) | Chat::ChannelForbidden(_) => {
+                Vec::new()
+            }
+            Chat::Channel(channel) => {
+                channel
+                    .usernames
+                    .as_deref()
+                    .map_or(Vec::new(), |usernames| {
+                        usernames
+                            .iter()
+                            .map(|username| match username {
+                                tl::enums::Username::Username(username) => {
+                                    username.username.as_ref()
+                                }
+                            })
+                            .collect()
+                    })
+            }
         }
     }
 

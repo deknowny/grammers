@@ -5,4 +5,19 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+
+mod callback_query;
+mod inline_query;
+mod inline_send;
+mod message;
+mod message_deletion;
+mod raw;
+mod update;
+
+pub use callback_query::CallbackQuery;
+pub use inline_query::InlineQuery;
+pub use inline_send::InlineSend;
+pub use message::Message;
+pub use message_deletion::MessageDeletion;
+pub use raw::Raw;
+pub use update::Update;

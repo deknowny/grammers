@@ -12,8 +12,8 @@ pub const TELEGRAM_TEST_DC_2: &str = "149.154.167.40:443";
 pub const TELEGRAM_DEFAULT_TEST_DC: &str = TELEGRAM_TEST_DC_2;
 
 use grammers_mtproto::transport;
-use grammers_mtsender::{connect, NoReconnect};
-use grammers_tl_types::{enums, functions, Deserializable, RemoteCall, LAYER};
+use grammers_mtsender::{NoReconnect, connect};
+use grammers_tl_types::{Deserializable, LAYER, RemoteCall, enums, functions};
 use std::str::FromStr;
 
 use simple_logger::SimpleLogger;
@@ -33,7 +33,9 @@ fn test_invoke_encrypted_method() {
     rt.block_on(async {
         let (mut sender, enqueuer) = connect(
             transport::Full::new(),
-            std::net::SocketAddr::from_str(TELEGRAM_TEST_DC_2).unwrap(),
+            grammers_mtsender::ServerAddr::Tcp {
+                address: std::net::SocketAddr::from_str(TELEGRAM_TEST_DC_2).unwrap(),
+            },
             &NoReconnect,
         )
         .await

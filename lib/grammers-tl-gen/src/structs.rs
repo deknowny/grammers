@@ -11,7 +11,7 @@
 use crate::grouper;
 use crate::metadata::Metadata;
 use crate::rustifier;
-use crate::{ignore_type, Config};
+use crate::{Config, ignore_type};
 use grammers_tl_parser::tl::{Category, Definition, ParameterType};
 use std::io::{self, Write};
 
@@ -63,6 +63,13 @@ fn write_struct<W: Write>(
         writeln!(file, "{indent}#[derive(Debug)]")?;
     }
 
+    if config.impl_serde {
+        writeln!(
+            file,
+            "{indent}#[derive(serde_derive::Serialize, serde_derive::Deserialize)]"
+        )?;
+    }
+
     writeln!(file, "{indent}#[derive(Clone, PartialEq)]")?;
     write!(
         file,
@@ -74,11 +81,14 @@ fn write_struct<W: Write>(
 
     writeln!(file)?;
     for param in def.params.iter() {
-        match param.ty {
+        match &param.ty {
             ParameterType::Flags => {
                 // Flags are computed on-the-fly, not stored
             }
-            ParameterType::Normal { .. } => {
+            ParameterType::Normal { ty, .. } => {
+                if config.impl_serde && ty.name.as_str() == "bytes" {
+                    writeln!(file, "{}    #[serde(with = \"serde_bytes\")]", indent)?;
+                }
                 writeln!(
                     file,
                     "{}    pub {}: {},",
@@ -290,7 +300,7 @@ fn write_deserializable<W: Write>(
                     )?;
                 } else {
                     write!(file, "let {} = ", rustifier::parameters::attr_name(param))?;
-                    if let Some(ref flag) = flag {
+                    if let Some(flag) = flag {
                         writeln!(file, "if ({} & {}) != 0 {{", flag.name, 1 << flag.index)?;
                         write!(file, "{indent}            Some(")?;
                     }
@@ -450,7 +460,11 @@ fn write_definition<W: Write>(
     write_struct(file, indent, def, metadata, config)?;
     write_identifiable(file, indent, def, metadata)?;
     write_serializable(file, indent, def, metadata)?;
-    if def.category == Category::Types || config.deserializable_functions {
+    if def.category == Category::Types
+        || config.deserializable_functions
+        // special-case needed for update handling
+        || def.name == "sendMessage"
+    {
         write_deserializable(file, indent, def, metadata)?;
     }
     if def.category == Category::Functions {
@@ -470,57 +484,16 @@ pub(crate) fn write_category_mod<W: Write>(
     metadata: &Metadata,
     config: &Config,
 ) -> io::Result<()> {
-    // Begin outermost mod
-    match category {
-        Category::Types => {
-            write!(
-                file,
-                "\
-                 /// This module contains all of the bare types, each\n\
-                 /// represented by a `struct`. All of them implement\n\
-                 /// [`Identifiable`], [`Serializable`] and [`Deserializable`].\n\
-                 ///\n\
-                 /// [`Identifiable`]: ../trait.Identifiable.html\n\
-                 /// [`Serializable`]: ../trait.Serializable.html\n\
-                 /// [`Deserializable`]: ../trait.Deserializable.html\n\
-                 #[allow(clippy::cognitive_complexity, clippy::identity_op, clippy::unreadable_literal)]\n\
-                 pub mod types {{\n\
-                 "
-            )?;
-        }
-        Category::Functions => {
-            writeln!(
-                file,
-                "\
-            /// This module contains all of the functions, each\n\
-            /// represented by a `struct`. All of them implement\n\
-            /// [`Identifiable`] and [`Serializable`].\n\
-            ///\n\
-            /// To find out the type that Telegram will return upon\n\
-            /// invoking one of these requests, check out the associated\n\
-            /// type in the corresponding [`RemoteCall`] trait impl.\n\
-            ///\n\
-            /// [`Identifiable`]: ../trait.Identifiable.html\n\
-            /// [`Serializable`]: ../trait.Serializable.html\n\
-            /// [`RemoteCall`]: trait.RemoteCall.html\n\
-            #[allow(clippy::cognitive_complexity, clippy::identity_op, clippy::unreadable_literal)]\n\
-            pub mod functions {{
-            "
-            )?;
-        }
-    }
-
     let grouped = grouper::group_by_ns(definitions, category);
     let mut sorted_keys: Vec<&String> = grouped.keys().collect();
     sorted_keys.sort();
     for key in sorted_keys.into_iter() {
         // Begin possibly inner mod
         let indent = if key.is_empty() {
-            "    "
+            ""
         } else {
-            writeln!(file, "    #[allow(clippy::unreadable_literal)]")?;
-            writeln!(file, "    pub mod {key} {{")?;
-            "        "
+            writeln!(file, "pub mod {key} {{")?;
+            "    "
         };
 
         if category == Category::Types && config.impl_from_enum {
@@ -539,10 +512,9 @@ pub(crate) fn write_category_mod<W: Write>(
 
         // End possibly inner mod
         if !key.is_empty() {
-            writeln!(file, "    }}")?;
+            writeln!(file, "}}")?;
         }
     }
 
-    // End outermost mod
-    writeln!(file, "}}")
+    Ok(())
 }

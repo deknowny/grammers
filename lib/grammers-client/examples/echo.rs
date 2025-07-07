@@ -10,7 +10,7 @@
 //! cargo run --example echo -- BOT_TOKEN
 //! ```
 
-use futures_util::future::{select, Either};
+use futures_util::future::{Either, select};
 use grammers_client::session::Session;
 use grammers_client::{Client, Config, InitParams, Update};
 use simple_logger::SimpleLogger;
@@ -26,7 +26,10 @@ async fn handle_update(client: Client, update: Update) -> Result {
     match update {
         Update::NewMessage(message) if !message.outgoing() => {
             let chat = message.chat();
-            println!("Responding to {}", chat.name());
+            println!(
+                "Responding to {}",
+                chat.name().unwrap_or(&format!("id {}", chat.id()))
+            );
             client.send_message(&chat, message.text()).await?;
         }
         _ => {}
