@@ -5,7 +5,7 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use super::{Error, Transport, UnpackedOffset};
+use super::{Error, Tagged, Transport, UnpackedOffset};
 use grammers_crypto::DequeBuffer;
 
 /// A light MTProto transport protocol available that guarantees data padded
@@ -31,6 +31,8 @@ pub struct Intermediate {
 
 #[allow(clippy::new_without_default)]
 impl Intermediate {
+    const TAG: [u8; 4] = 0xee_ee_ee_ee_u32.to_le_bytes();
+
     pub fn new() -> Self {
         Self { init: false }
     }
@@ -44,12 +46,12 @@ impl Transport for Intermediate {
         buffer.extend_front(&(len as i32).to_le_bytes());
 
         if !self.init {
-            buffer.extend_front(&0xee_ee_ee_ee_u32.to_le_bytes());
+            buffer.extend_front(&Self::TAG);
             self.init = true;
         }
     }
 
-    fn unpack(&mut self, buffer: &[u8]) -> Result<UnpackedOffset, Error> {
+    fn unpack(&mut self, buffer: &mut [u8]) -> Result<UnpackedOffset, Error> {
         if buffer.len() < 4 {
             return Err(Error::MissingBytes);
         }
@@ -81,6 +83,13 @@ impl Transport for Intermediate {
     fn reset(&mut self) {
         log::info!("resetting sending of header in intermediate transport");
         self.init = false;
+    }
+}
+
+impl Tagged for Intermediate {
+    fn init_tag(&mut self) -> [u8; 4] {
+        self.init = true;
+        Self::TAG
     }
 }
 
@@ -123,7 +132,7 @@ mod tests {
         let mut transport = Intermediate::new();
         let mut buffer = DequeBuffer::with_capacity(1, 0);
         buffer.extend([1]);
-        assert_eq!(transport.unpack(&buffer[..],), Err(Error::MissingBytes));
+        assert_eq!(transport.unpack(&mut buffer[..],), Err(Error::MissingBytes));
     }
 
     #[test]
@@ -132,7 +141,7 @@ mod tests {
         let orig = buffer.clone();
         transport.pack(&mut buffer);
         let n = 4; // init bytes
-        let offset = transport.unpack(&buffer[n..]).unwrap();
+        let offset = transport.unpack(&mut buffer[n..]).unwrap();
         assert_eq!(&buffer[n..][offset.data_start..offset.data_end], &orig[..]);
     }
 
@@ -150,12 +159,12 @@ mod tests {
         transport.pack(&mut buffer);
         two_buffer.extend(&buffer[..]);
 
-        let offset = transport.unpack(&two_buffer[..]).unwrap();
+        let offset = transport.unpack(&mut two_buffer[..]).unwrap();
         assert_eq!(&buffer[offset.data_start..offset.data_end], &orig[..]);
         assert_eq!(offset.next_offset, single_size);
 
         let n = offset.next_offset;
-        let offset = transport.unpack(&two_buffer[n..]).unwrap();
+        let offset = transport.unpack(&mut two_buffer[n..]).unwrap();
         assert_eq!(&buffer[offset.data_start..offset.data_end], &orig[..]);
     }
 
@@ -167,7 +176,7 @@ mod tests {
         buffer.extend(&(-404_i32).to_le_bytes());
 
         assert_eq!(
-            transport.unpack(&buffer[..]),
+            transport.unpack(&mut buffer[..]),
             Err(Error::BadStatus { status: 404 })
         );
     }

@@ -84,12 +84,13 @@ impl Chat {
     /// For private conversations (users), this is their first name. For groups and channels,
     /// this is their title.
     ///
-    /// The name may be empty if the chat is inaccessible or if the account was deleted.
-    pub fn name(&self) -> &str {
+    /// The name will be `None` if the chat is inaccessible or if the account was deleted. It may
+    /// also be `None` if you received it previously.
+    pub fn name(&self) -> Option<&str> {
         match self {
             Self::User(user) => user.first_name(),
             Self::Group(group) => group.title(),
-            Self::Channel(channel) => channel.title(),
+            Self::Channel(channel) => Some(channel.title()),
         }
     }
 
@@ -104,17 +105,16 @@ impl Chat {
 
     pub(crate) fn unpack(packed: PackedChat) -> Self {
         match packed.ty {
-            PackedType::User => {
-                let mut user = User::from_raw(tl::types::UserEmpty { id: packed.id }.into());
-                user.raw.access_hash = packed.access_hash;
-                Chat::User(user)
-            }
-            PackedType::Bot => {
-                let mut user = User::from_raw(tl::types::UserEmpty { id: packed.id }.into());
-                user.raw.access_hash = packed.access_hash;
-                user.raw.bot = true;
-                Chat::User(user)
-            }
+            PackedType::User => Chat::User(User::empty_with_hash_and_bot(
+                packed.id,
+                packed.access_hash,
+                false,
+            )),
+            PackedType::Bot => Chat::User(User::empty_with_hash_and_bot(
+                packed.id,
+                packed.access_hash,
+                true,
+            )),
             PackedType::Chat => Chat::Group(Group::from_raw(
                 tl::types::ChatEmpty { id: packed.id }.into(),
             )),
@@ -157,6 +157,20 @@ impl Chat {
         }
     }
 
+    /// Return collectible usernames of this chat, if any.
+    ///
+    /// The returned usernames do not contain the "@" prefix.
+    ///
+    /// Outside of the application, people may link to this user with one of its username, such
+    /// as https://t.me/username.
+    pub fn usernames(&self) -> Vec<&str> {
+        match self {
+            Self::User(user) => user.usernames(),
+            Self::Group(group) => group.usernames(),
+            Self::Channel(channel) => channel.usernames(),
+        }
+    }
+
     // If `Self` has `min` `access_hash`, returns a mutable reference to both `min` and `access_hash`.
     //
     // This serves as a way of checking "is it min?" and "update the access hash" both in one.
@@ -165,9 +179,12 @@ impl Chat {
     // is missing).
     pub(crate) fn get_min_hash_ref(&mut self) -> Option<(&mut bool, &mut i64)> {
         match self {
-            Self::User(user) => match (&mut user.raw.min, user.raw.access_hash.as_mut()) {
-                (m @ true, Some(ah)) => Some((m, ah)),
-                _ => None,
+            Self::User(user) => match &mut user.raw {
+                tl::enums::User::User(raw) => match (&mut raw.min, raw.access_hash.as_mut()) {
+                    (m @ true, Some(ah)) => Some((m, ah)),
+                    _ => None,
+                },
+                tl::enums::User::Empty(_) => None,
             },
             // Small group chats don't have an `access_hash` to begin with.
             Self::Group(_group) => None,
@@ -180,30 +197,36 @@ impl Chat {
         }
     }
 
-    // get an chat photo downloadable
-    pub fn photo_downloadable(&self, big: bool) -> Option<crate::types::Downloadable> {
+    // Return the profile picture or chat photo of this chat, if any.
+    pub fn photo(&self, big: bool) -> Option<crate::types::ChatPhoto> {
         let peer = self.pack().to_input_peer();
         match self {
-            Self::User(user) => user.photo().map(|x| {
-                crate::types::Downloadable::UserProfilePhoto(crate::types::UserProfilePhoto {
-                    big,
-                    peer,
-                    raw: x.clone(),
-                })
+            Self::User(user) => user.photo().map(|x| crate::types::ChatPhoto {
+                raw: tl::enums::InputFileLocation::InputPeerPhotoFileLocation(
+                    tl::types::InputPeerPhotoFileLocation {
+                        big,
+                        peer,
+                        photo_id: x.photo_id,
+                    },
+                ),
             }),
-            Self::Group(group) => group.photo().map(|x| {
-                crate::types::Downloadable::ChatPhoto(crate::types::ChatPhoto {
-                    big,
-                    peer,
-                    raw: x.clone(),
-                })
+            Self::Group(group) => group.photo().map(|x| crate::types::ChatPhoto {
+                raw: tl::enums::InputFileLocation::InputPeerPhotoFileLocation(
+                    tl::types::InputPeerPhotoFileLocation {
+                        big,
+                        peer,
+                        photo_id: x.photo_id,
+                    },
+                ),
             }),
-            Self::Channel(channel) => channel.photo().map(|x| {
-                crate::types::Downloadable::ChatPhoto(crate::types::ChatPhoto {
-                    big,
-                    peer,
-                    raw: x.clone(),
-                })
+            Self::Channel(channel) => channel.photo().map(|x| crate::types::ChatPhoto {
+                raw: tl::enums::InputFileLocation::InputPeerPhotoFileLocation(
+                    tl::types::InputPeerPhotoFileLocation {
+                        big,
+                        peer,
+                        photo_id: x.photo_id,
+                    },
+                ),
             }),
         }
     }

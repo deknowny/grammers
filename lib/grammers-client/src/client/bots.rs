@@ -5,10 +5,10 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+use crate::Client;
 use crate::client::messages::parse_mention_entities;
 use crate::utils::generate_random_id;
-use crate::Client;
-use crate::{types::IterBuffer, InputMessage};
+use crate::{InputMessage, types::IterBuffer};
 pub use grammers_mtsender::{AuthorizationError, InvocationError};
 use grammers_session::PackedChat;
 use grammers_tl_types as tl;
@@ -18,7 +18,7 @@ const MAX_LIMIT: usize = 50;
 pub struct InlineResult {
     client: Client,
     query_id: i64,
-    result: tl::enums::BotInlineResult,
+    pub raw: tl::enums::BotInlineResult,
 }
 
 pub type InlineResultIter = IterBuffer<tl::functions::messages::GetInlineBotResults, InlineResult>;
@@ -50,7 +50,7 @@ impl InlineResult {
     pub fn id(&self) -> &str {
         use tl::enums::BotInlineResult::*;
 
-        match &self.result {
+        match &self.raw {
             Result(r) => &r.id,
             BotInlineMediaResult(r) => &r.id,
         }
@@ -60,7 +60,7 @@ impl InlineResult {
     pub fn title(&self) -> Option<&String> {
         use tl::enums::BotInlineResult::*;
 
-        match &self.result {
+        match &self.raw {
             Result(r) => r.title.as_ref(),
             BotInlineMediaResult(r) => r.title.as_ref(),
         }
@@ -118,7 +118,7 @@ impl InlineResultIter {
             .extend(results.into_iter().map(|r| InlineResult {
                 client: client.clone(),
                 query_id,
-                result: r,
+                raw: r,
             }));
 
         Ok(self.pop_item())
@@ -153,6 +153,12 @@ impl Client {
         InlineResultIter::new(self, bot.into(), query)
     }
 
+    /// Edits an inline message sent by a bot.
+    ///
+    /// Similar to [`Client::send_message`], advanced formatting can be achieved with the
+    /// options offered by [`InputMessage`].
+    ///
+    /// [`InputMessage`]: crate::InputMessage
     pub async fn edit_inline_message<M: Into<InputMessage>>(
         &self,
         message_id: tl::enums::InputBotInlineMessageId,
@@ -160,9 +166,15 @@ impl Client {
     ) -> Result<bool, InvocationError> {
         let message: InputMessage = input_message.into();
         let entities = parse_mention_entities(self, message.entities);
-        let dc_id = message_id.dc_id();
-        let result = self
-            .invoke_in_dc(
+        if message.media.as_ref().is_some_and(|media| {
+            !matches!(
+                media,
+                tl::enums::InputMedia::PhotoExternal(_)
+                    | tl::enums::InputMedia::DocumentExternal(_),
+            )
+        }) {
+            let dc_id = message_id.dc_id();
+            self.invoke_in_dc(
                 &tl::functions::messages::EditInlineBotMessage {
                     id: message_id,
                     message: Some(message.text),
@@ -174,7 +186,18 @@ impl Client {
                 },
                 dc_id,
             )
-            .await?;
-        Ok(result)
+            .await
+        } else {
+            self.invoke(&tl::functions::messages::EditInlineBotMessage {
+                id: message_id,
+                message: Some(message.text),
+                media: message.media,
+                entities,
+                no_webpage: !message.link_preview,
+                reply_markup: message.reply_markup,
+                invert_media: message.invert_media,
+            })
+            .await
+        }
     }
 }

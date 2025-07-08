@@ -7,11 +7,14 @@
 // except according to those terms.
 #![cfg(feature = "html")]
 
+use std::cell::Cell;
+
 use super::common::{
-    after, before, inject_into_message, telegram_string_len, Segment, MENTION_URL_PREFIX,
+    MENTION_URL_PREFIX, Segment, after, before, inject_into_message, telegram_string_len,
 };
 use crate::update_entity_len;
 use grammers_tl_types as tl;
+use html5ever::local_name as tag;
 use html5ever::tendril::StrTendril;
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer,
@@ -36,17 +39,21 @@ const CODE_LANG_PREFIX: &str = "language-";
 
 pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntity>) {
     struct Sink {
-        text: String,
-        entities: Vec<tl::enums::MessageEntity>,
-        offset: i32,
+        text: Cell<String>,
+        entities: Cell<Vec<tl::enums::MessageEntity>>,
+        offset: Cell<i32>,
     }
 
     impl TokenSink for Sink {
         type Handle = ();
 
-        fn process_token(&mut self, token: Token, _line_number: u64) -> TokenSinkResult<()> {
-            let offset = self.offset;
+        fn process_token(&self, token: Token, _line_number: u64) -> TokenSinkResult<()> {
+            let mut text = self.text.take();
+            let mut entities = self.entities.take();
+            let mut offset = self.offset.get();
+
             let length = 0;
+
             match token {
                 Token::TagToken(Tag {
                     kind: TagKind::StartTag,
@@ -54,52 +61,55 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
                     self_closing: _,
                     attrs,
                 }) => match name {
-                    n if n == TAG_B || n == TAG_STRONG => {
-                        self.entities
-                            .push(tl::types::MessageEntityBold { offset, length }.into());
+                    n if n == tag!("b") || n == tag!("strong") => {
+                        entities.push(tl::types::MessageEntityBold { offset, length }.into());
                     }
-                    n if n == TAG_I || n == TAG_EM => {
-                        self.entities
-                            .push(tl::types::MessageEntityItalic { offset, length }.into());
+                    n if n == tag!("i") || n == tag!("em") => {
+                        entities.push(tl::types::MessageEntityItalic { offset, length }.into());
                     }
-                    n if n == TAG_S || n == TAG_DEL => {
-                        self.entities
-                            .push(tl::types::MessageEntityStrike { offset, length }.into());
+                    n if n == tag!("s") || n == tag!("del") => {
+                        entities.push(tl::types::MessageEntityStrike { offset, length }.into());
                     }
-                    TAG_U => {
-                        self.entities
-                            .push(tl::types::MessageEntityUnderline { offset, length }.into());
+                    tag!("u") => {
+                        entities.push(tl::types::MessageEntityUnderline { offset, length }.into());
                     }
-                    TAG_BLOCKQUOTE => {
-                        self.entities
-                            .push(tl::types::MessageEntityBlockquote { offset, length, collapsed: false, }.into());
+                    tag!("blockquote") => {
+                        let collapsed = attrs.into_iter().any(|a| &a.name.local == "expandable");
+
+                        entities.push(
+                            tl::types::MessageEntityBlockquote {
+                                offset,
+                                length,
+                                collapsed,
+                            }
+                            .into(),
+                        );
                     }
-                    TAG_DETAILS => {
-                        self.entities
-                            .push(tl::types::MessageEntitySpoiler { offset, length }.into());
+                    tag!("details") => {
+                        entities.push(tl::types::MessageEntitySpoiler { offset, length }.into());
                     }
-                    TAG_CODE => {
-                        match self.entities.iter_mut().rev().next() {
+                    tag!("code") => {
+                        match entities.iter_mut().rev().next() {
                             // If the previous tag is an open `<pre>`, don't add `<code>`;
                             // we most likely want to indicate `class="language-foo"`.
                             Some(tl::enums::MessageEntity::Pre(e)) if e.length == 0 => {
                                 e.language = attrs
                                     .into_iter()
                                     .find(|a| {
-                                        a.name.local == ATTR_CLASS
+                                        a.name.local == tag!("class")
                                             && a.value.starts_with(CODE_LANG_PREFIX)
                                     })
                                     .map(|a| a.value[CODE_LANG_PREFIX.len()..].to_string())
                                     .unwrap_or_else(|| "".to_string());
                             }
                             _ => {
-                                self.entities
+                                entities
                                     .push(tl::types::MessageEntityCode { offset, length }.into());
                             }
                         }
                     }
-                    TAG_PRE => {
-                        self.entities.push(
+                    tag!("pre") => {
+                        entities.push(
                             tl::types::MessageEntityPre {
                                 offset,
                                 length,
@@ -108,16 +118,16 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
                             .into(),
                         );
                     }
-                    TAG_A => {
+                    tag!("a") => {
                         let url = attrs
                             .into_iter()
-                            .find(|a| a.name.local == ATTR_HREF)
+                            .find(|a| a.name.local == tag!("href"))
                             .map(|a| a.value.to_string())
                             .unwrap_or_else(|| "".to_string());
 
                         if url.starts_with(MENTION_URL_PREFIX) {
                             let user_id = url[MENTION_URL_PREFIX.len()..].parse::<i64>().unwrap();
-                            self.entities.push(
+                            entities.push(
                                 tl::types::MessageEntityMentionName {
                                     offset,
                                     length,
@@ -126,7 +136,7 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
                                 .into(),
                             );
                         } else {
-                            self.entities.push(
+                            entities.push(
                                 tl::types::MessageEntityTextUrl {
                                     offset,
                                     length,
@@ -160,45 +170,45 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
                     self_closing: _,
                     attrs: _,
                 }) => match name {
-                    n if n == TAG_B || n == TAG_STRONG => {
-                        update_entity_len!(Bold(self.offset) in self.entities);
+                    n if n == tag!("b") || n == tag!("strong") => {
+                        update_entity_len!(Bold(offset) in entities);
                     }
-                    n if n == TAG_I || n == TAG_EM => {
-                        update_entity_len!(Italic(self.offset) in self.entities);
+                    n if n == tag!("i") || n == tag!("em") => {
+                        update_entity_len!(Italic(offset) in entities);
                     }
-                    n if n == TAG_S || n == TAG_DEL => {
-                        update_entity_len!(Strike(self.offset) in self.entities);
+                    n if n == tag!("s") || n == tag!("del") => {
+                        update_entity_len!(Strike(offset) in entities);
                     }
-                    TAG_U => {
-                        update_entity_len!(Underline(self.offset) in self.entities);
+                    tag!("u") => {
+                        update_entity_len!(Underline(offset) in entities);
                     }
-                    TAG_BLOCKQUOTE => {
-                        update_entity_len!(Blockquote(self.offset) in self.entities);
+                    tag!("blockquote") => {
+                        update_entity_len!(Blockquote(offset) in entities);
                     }
-                    TAG_DETAILS => {
-                        update_entity_len!(Spoiler(self.offset) in self.entities);
+                    tag!("details") => {
+                        update_entity_len!(Spoiler(offset) in entities);
                     }
-                    TAG_CODE => {
-                        match self.entities.iter_mut().rev().next() {
+                    tag!("code") => {
+                        match entities.iter_mut().rev().next() {
                             // If the previous tag is an open `<pre>`, don't update `<code>` len;
                             // we most likely want to indicate `class="language-foo"`.
                             Some(tl::enums::MessageEntity::Pre(e)) if e.length == 0 => {}
                             _ => {
-                                update_entity_len!(Code(self.offset) in self.entities);
+                                update_entity_len!(Code(offset) in entities);
                             }
                         }
                     }
-                    TAG_PRE => {
-                        update_entity_len!(Pre(self.offset) in self.entities);
+                    tag!("pre") => {
+                        update_entity_len!(Pre(offset) in entities);
                     }
-                    TAG_A => {
-                        match self.entities.iter_mut().rev().next() {
+                    tag!("a") => {
+                        match entities.iter_mut().rev().next() {
                             // If the previous url is a mention, don't close with `</a>`;
                             Some(tl::enums::MessageEntity::MentionName(_)) => {
-                                update_entity_len!(MentionName(self.offset) in self.entities);
+                                update_entity_len!(MentionName(offset) in entities);
                             }
                             _ => {
-                                update_entity_len!(TextUrl(self.offset) in self.entities);
+                                update_entity_len!(TextUrl(offset) in entities);
                             }
                         }
                     }
@@ -208,23 +218,28 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
                     _ => {}
                 },
                 Token::CharacterTokens(string) => {
-                    self.text.push_str(&string);
-                    self.offset += telegram_string_len(&string);
+                    text.push_str(&string);
+                    offset += telegram_string_len(&string);
                 }
                 _ => {}
             }
+
+            self.text.replace(text);
+            self.entities.replace(entities);
+            self.offset.replace(offset);
+
             TokenSinkResult::Continue
         }
     }
 
-    let mut input = BufferQueue::new();
+    let mut input = BufferQueue::default();
     input.push_back(StrTendril::from_slice(message).try_reinterpret().unwrap());
 
-    let mut tok = Tokenizer::new(
+    let tok = Tokenizer::new(
         Sink {
-            text: String::with_capacity(message.len()),
-            entities: Vec::new(),
-            offset: 0,
+            text: Cell::new(String::with_capacity(message.len())),
+            entities: Cell::new(Vec::new()),
+            offset: Cell::new(0),
         },
         Default::default(),
     );
@@ -233,7 +248,7 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
 
     let Sink { text, entities, .. } = tok.sink;
 
-    (text, entities)
+    (text.take(), entities.take())
 }
 
 pub fn generate_html_message(message: &str, entities: &[tl::enums::MessageEntity]) -> String {
@@ -332,7 +347,14 @@ pub fn generate_html_message(message: &str, entities: &[tl::enums::MessageEntity
                 insertions.push((after(i, 0, e.offset + e.length), Segment::Fixed("</del>")));
             }
             ME::Blockquote(e) => {
-                insertions.push((before(i, 0, e.offset), Segment::Fixed("<blockquote>")));
+                if e.collapsed {
+                    insertions.push((
+                        before(i, 0, e.offset),
+                        Segment::Fixed("<blockquote expandable>"),
+                    ));
+                } else {
+                    insertions.push((before(i, 0, e.offset), Segment::Fixed("<blockquote>")));
+                }
                 insertions.push((
                     after(i, 0, e.offset + e.length),
                     Segment::Fixed("</blockquote>"),
@@ -368,11 +390,13 @@ mod tests {
         assert_eq!(text, "Hello world!");
         assert_eq!(
             entities,
-            vec![tl::types::MessageEntityBold {
-                offset: 0,
-                length: 5
-            }
-            .into()]
+            vec![
+                tl::types::MessageEntityBold {
+                    offset: 0,
+                    length: 5
+                }
+                .into()
+            ]
         );
     }
 
@@ -382,11 +406,13 @@ mod tests {
         assert_eq!(text, "Hello world!");
         assert_eq!(
             entities,
-            vec![tl::types::MessageEntityBold {
-                offset: 6,
-                length: 6
-            }
-            .into()]
+            vec![
+                tl::types::MessageEntityBold {
+                    offset: 6,
+                    length: 6
+                }
+                .into()
+            ]
         );
     }
 
@@ -396,11 +422,13 @@ mod tests {
         assert_eq!(text, "A little 🦀 here");
         assert_eq!(
             entities,
-            vec![tl::types::MessageEntityBold {
-                offset: 2,
-                length: 9
-            }
-            .into()]
+            vec![
+                tl::types::MessageEntityBold {
+                    offset: 2,
+                    length: 9
+                }
+                .into()
+            ]
         );
     }
 
@@ -533,11 +561,13 @@ mod tests {
         assert_eq!(text, "Some empty  and code");
         assert_eq!(
             entities,
-            vec![tl::types::MessageEntityCode {
-                offset: 16,
-                length: 4,
-            }
-            .into(),]
+            vec![
+                tl::types::MessageEntityCode {
+                    offset: 16,
+                    length: 4,
+                }
+                .into(),
+            ]
         );
     }
 
@@ -548,12 +578,14 @@ mod tests {
         assert_eq!(text, "Some empty link, it does nothing");
         assert_eq!(
             entities,
-            vec![tl::types::MessageEntityTextUrl {
-                offset: 5,
-                length: 10,
-                url: "".to_string()
-            }
-            .into(),]
+            vec![
+                tl::types::MessageEntityTextUrl {
+                    offset: 5,
+                    length: 10,
+                    url: "".to_string()
+                }
+                .into(),
+            ]
         );
     }
 

@@ -68,6 +68,7 @@ impl Channel {
                             stories_hidden: false,
                             stories_hidden_min: false,
                             stories_unavailable: true,
+                            signature_profiles: false,
                             join_to_send: false,
                             id: channel.id,
                             access_hash: Some(channel.access_hash),
@@ -86,6 +87,8 @@ impl Channel {
                             profile_color: None,
                             emoji_status: None,
                             level: None,
+                            subscription_until_date: None,
+                            bot_verification_icon: None,
                         },
                     }
                 } else {
@@ -126,6 +129,26 @@ impl Channel {
     /// as https://t.me/username.
     pub fn username(&self) -> Option<&str> {
         self.raw.username.as_deref()
+    }
+
+    /// Return collectible usernames of this chat, if any.
+    ///
+    /// The returned usernames do not contain the "@" prefix.
+    ///
+    /// Outside of the application, people may link to this user with one of its username, such
+    /// as https://t.me/username.
+    pub fn usernames(&self) -> Vec<&str> {
+        self.raw
+            .usernames
+            .as_deref()
+            .map_or(Vec::new(), |usernames| {
+                usernames
+                    .iter()
+                    .map(|username| match username {
+                        tl::enums::Username::Username(username) => username.username.as_ref(),
+                    })
+                    .collect()
+            })
     }
 
     /// Return the photo of this channel, if any.

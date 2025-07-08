@@ -5,8 +5,8 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use super::net::connect_sender;
 use super::Client;
+use super::net::connect_sender;
 use crate::types::{LoginToken, PasswordToken, TermsOfService, User};
 use crate::utils;
 use grammers_crypto::two_factor_auth::{calculate_2fa, check_p_and_g};
@@ -64,9 +64,9 @@ impl Client {
     /// ```
     /// # async fn f(client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// if client.is_authorized().await? {
-    ///     println!("Client is not authorized, you will need to sign_in!");
+    ///     println!("Client already authorized and ready to use!");
     /// } else {
-    ///     println!("Client already authorized and ready to use!")
+    ///     println!("Client is not authorized, you will need to sign_in!");
     /// }
     /// # Ok(())
     /// # }
@@ -136,7 +136,12 @@ impl Client {
     ///     }
     /// };
     ///
-    /// println!("Signed in as {}!", user.first_name());
+    /// if let Some(first_name) = user.first_name() {
+    ///     println!("Signed in as {}!", first_name);
+    /// } else {
+    ///     println!("Signed in!");
+    /// }
+    ///
     /// # Ok(())
     /// # }
     /// ```
@@ -286,7 +291,11 @@ impl Client {
     ///     }
     /// };
     ///
-    /// println!("Signed in as {}!", user.first_name());
+    /// if let Some(first_name) = user.first_name() {
+    ///     println!("Signed in as {}!", first_name);
+    /// } else {
+    ///   println!("Signed in!");
+    /// }
     /// # Ok(())
     /// # }
     /// ```

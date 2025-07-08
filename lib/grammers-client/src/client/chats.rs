@@ -10,8 +10,8 @@
 
 use super::Client;
 use crate::types::{
-    chats::AdminRightsBuilderInner, chats::BannedRightsBuilderInner, AdminRightsBuilder,
-    BannedRightsBuilder, Chat, ChatMap, IterBuffer, Message, Participant, Photo, User,
+    AdminRightsBuilder, BannedRightsBuilder, Chat, ChatMap, IterBuffer, Message, Participant,
+    Photo, User, chats::AdminRightsBuilderInner, chats::BannedRightsBuilderInner,
 };
 use grammers_mtsender::RpcError;
 pub use grammers_mtsender::{AuthorizationError, InvocationError};
@@ -293,8 +293,7 @@ impl ProfilePhotoIter {
                     iter.request.offset += photos.len() as i32;
                 }
 
-                iter.buffer
-                    .extend(photos.into_iter().map(|x| Photo::from_raw(x)));
+                iter.buffer.extend(photos.into_iter().map(Photo::from_raw));
 
                 Ok(total)
             }
@@ -319,9 +318,9 @@ impl ProfilePhotoIter {
                 while let Some(message) = iter.next().await? {
                     if let Some(tl::enums::MessageAction::ChatEditPhoto(
                         tl::types::MessageActionChatEditPhoto { photo },
-                    )) = message.raw_action
+                    )) = message.action()
                     {
-                        return Ok(Some(Photo::from_raw(photo)));
+                        return Ok(Some(Photo::from_raw(photo.clone())));
                     } else {
                         continue;
                     }
@@ -334,6 +333,25 @@ impl ProfilePhotoIter {
             Self::Chat(_) => Ok(None),
         }
     }
+}
+
+fn updates_to_chat(id: Option<i64>, updates: tl::enums::Updates) -> Option<Chat> {
+    use tl::enums::Updates;
+
+    let chats = match updates {
+        Updates::Combined(updates) => Some(updates.chats),
+        Updates::Updates(updates) => Some(updates.chats),
+        _ => None,
+    };
+
+    match chats {
+        Some(chats) => match id {
+            Some(id) => chats.into_iter().find(|chat| chat.id() == id),
+            None => chats.into_iter().next(),
+        },
+        None => None,
+    }
+    .map(Chat::from_raw)
 }
 
 /// Method implementations related to dealing with chats or other users.
@@ -356,6 +374,7 @@ impl Client {
         let tl::types::contacts::ResolvedPeer { peer, users, chats } = match self
             .invoke(&tl::functions::contacts::ResolveUsername {
                 username: username.into(),
+                referer: None,
             })
             .await
         {
@@ -425,7 +444,11 @@ impl Client {
     /// let mut participants = client.iter_participants(&chat);
     ///
     /// while let Some(participant) = participants.next().await? {
-    ///     println!("{} has role {:?}", participant.user.first_name(), participant.role);
+    ///     println!(
+    ///         "{} has role {:?}",
+    ///         participant.user.first_name().unwrap_or(&participant.user.id().to_string()),
+    ///         participant.role
+    ///     );
     /// }
     /// # Ok(())
     /// # }
@@ -614,7 +637,7 @@ impl Client {
     /// # async fn f(packed_chat: grammers_client::types::chat::PackedChat, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let chat = client.unpack_chat(packed_chat).await?;
     ///
-    /// println!("Found chat: {}", chat.name());
+    /// println!("Found chat: {}", chat.name().unwrap_or(&chat.id().to_string()));
     /// # Ok(())
     /// # }
     /// ```
@@ -734,7 +757,7 @@ impl Client {
     }
 
     #[cfg(feature = "parse_invite_link")]
-    fn parse_invite_link(invite_link: &str) -> Option<String> {
+    pub fn parse_invite_link(invite_link: &str) -> Option<String> {
         let url_parse_result = url::Url::parse(invite_link);
         if url_parse_result.is_err() {
             return None;
@@ -788,12 +811,13 @@ impl Client {
     pub async fn accept_invite_link(
         &self,
         invite_link: &str,
-    ) -> Result<tl::enums::Updates, InvocationError> {
+    ) -> Result<Option<Chat>, InvocationError> {
         match Self::parse_invite_link(invite_link) {
-            Some(hash) => {
+            Some(hash) => Ok(updates_to_chat(
+                None,
                 self.invoke(&tl::functions::messages::ImportChatInvite { hash })
-                    .await
-            }
+                    .await?,
+            )),
             None => Err(InvocationError::Rpc(RpcError {
                 code: 400,
                 name: "INVITE_HASH_INVALID".to_string(),
@@ -815,38 +839,79 @@ impl Client {
         &self,
         chat: C,
     ) -> Result<Option<Chat>, InvocationError> {
-        use tl::enums::Updates;
-
-        let chat = chat.into();
-        let update_chat = match self
-            .invoke(&tl::functions::channels::JoinChannel {
-                channel: chat.try_to_input_channel().unwrap(),
+        let chat: PackedChat = chat.into();
+        let channel = chat.try_to_input_channel().ok_or_else(|| {
+            InvocationError::Rpc(RpcError {
+                code: 400,
+                name: "CHANNEL_INVALID".to_owned(),
+                value: None,
+                caused_by: None,
             })
-            .await?
-        {
-            Updates::Combined(updates) => Some(
-                updates
-                    .chats
-                    .into_iter()
-                    .filter(|x| x.id() == chat.id)
-                    .collect::<Vec<tl::enums::Chat>>(),
-            ),
-            Updates::Updates(updates) => Some(
-                updates
-                    .chats
-                    .into_iter()
-                    .filter(|x| x.id() == chat.id)
-                    .collect::<Vec<tl::enums::Chat>>(),
-            ),
-            _ => None,
-        };
+        })?;
+        Ok(updates_to_chat(
+            Some(chat.id),
+            self.invoke(&tl::functions::channels::JoinChannel { channel })
+                .await?,
+        ))
+    }
 
-        match update_chat {
-            Some(chats) if !chats.is_empty() => Ok(Some(Chat::from_raw(chats[0].clone()))),
-            Some(chats) if chats.is_empty() => Ok(None),
-            None => Ok(None),
-            Some(_) => Ok(None),
-        }
+    /// Send a message action (such as typing, uploading photo, or viewing an emoji interaction)
+    ///
+    /// # Examples
+    ///
+    /// **Do a one-shot pulse and let it fade away**
+    /// ```
+    /// # async fn f(chat: grammers_client::types::Chat, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use grammers_tl_types::enums::SendMessageAction;
+    ///
+    /// client
+    ///     .action(&chat)
+    ///     .oneshot(SendMessageAction::SendMessageTypingAction)
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// **Repeat request until the future is done**
+    /// ```
+    /// # use std::time::Duration;
+    ///
+    /// # async fn f(chat: grammers_client::types::Chat, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// use grammers_tl_types as tl;
+    ///
+    /// let heavy_task = async {
+    ///     tokio::time::sleep(Duration::from_secs(10)).await;
+    ///
+    ///     42
+    /// };
+    ///
+    /// tokio::pin!(heavy_task);
+    ///
+    /// let (task_result, _) = client
+    ///     .action(&chat)
+    ///     .repeat(
+    ///         // most clients doesn't actually show progress of an action
+    ///         || tl::types::SendMessageUploadDocumentAction { progress: 0 },
+    ///         heavy_task
+    ///     )
+    ///     .await;
+    ///
+    /// // Note: repeat function does not cancel actions automatically, they will just fade away
+    ///
+    /// assert_eq!(task_result, 42);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// **Cancel any actions**
+    /// ```
+    /// # async fn f(chat: grammers_client::types::Chat, client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// client.action(&chat).cancel().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn action<C: Into<PackedChat>>(&self, chat: C) -> crate::types::ActionSender {
+        crate::types::ActionSender::new(self, chat)
     }
 }
 

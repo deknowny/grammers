@@ -10,13 +10,15 @@ use super::{Client, ClientInner, Config};
 use crate::utils;
 use grammers_mtproto::mtp;
 use grammers_mtproto::transport;
-use grammers_mtsender::{self as sender, AuthorizationError, InvocationError, RpcError, Sender};
-use grammers_session::{ChatHashCache, MessageBox};
+use grammers_mtsender::{
+    self as sender, AuthorizationError, InvocationError, RpcError, Sender, ServerAddr, utils::sleep,
+};
+use grammers_session::{ChatHashCache, MessageBoxes, UpdatesLike};
 use grammers_tl_types::{self as tl, Deserializable};
 use log::{debug, info};
 use sender::Enqueuer;
 use std::collections::{HashMap, VecDeque};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::oneshot::error::TryRecvError;
@@ -27,6 +29,7 @@ use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 ///
 /// The addresses were obtained from the `static` addresses through a call to
 /// `functions::help::GetConfig`.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 const DC_ADDRESSES: [(Ipv4Addr, u16); 6] = [
     (Ipv4Addr::new(0, 0, 0, 0), 0),
     (Ipv4Addr::new(149, 154, 175, 53), 443),
@@ -36,18 +39,68 @@ const DC_ADDRESSES: [(Ipv4Addr, u16); 6] = [
     (Ipv4Addr::new(91, 108, 56, 190), 443),
 ];
 
+/// WebSocket addresses to Telegram datacenters, where the index into this array
+/// represents the data center ID.
+///
+/// The addresses were obtained from the official docs.
+/// See [URI Format](https://core.telegram.org/mtproto/transports#uri-format).
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+const WS_ADDRESSES: [&str; 6] = [
+    "",
+    "wss://pluto.web.telegram.org/apiws",
+    "wss://venus.web.telegram.org/apiws",
+    "wss://aurora.web.telegram.org/apiws",
+    "wss://vesta.web.telegram.org/apiws",
+    "wss://flora.web.telegram.org/apiws",
+];
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) type Transport = transport::Full;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) type Transport = transport::Obfuscated<transport::Intermediate>;
+
 const DEFAULT_DC: i32 = 2;
 
 pub(crate) async fn connect_sender(
     dc_id: i32,
     config: &Config,
-) -> Result<(Sender<transport::Full, mtp::Encrypted>, Enqueuer), AuthorizationError> {
+) -> Result<(Sender<Transport, mtp::Encrypted>, Enqueuer), AuthorizationError> {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     let transport = transport::Full::new();
 
-    let addr: SocketAddr = if let Some(ip) = config.params.server_addr {
-        ip
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    let transport = transport::Obfuscated::new(transport::Intermediate::new());
+
+    let addr: ServerAddr = if let Some(ref sa) = config.params.server_addr {
+        sa.clone()
     } else {
-        DC_ADDRESSES[dc_id as usize].into()
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        let addr = {
+            let tcp_addr = DC_ADDRESSES[dc_id as usize].into();
+
+            #[cfg(not(feature = "proxy"))]
+            let addr = ServerAddr::Tcp { address: tcp_addr };
+
+            #[cfg(feature = "proxy")]
+            let addr = if let Some(proxy) = &config.params.proxy_url {
+                ServerAddr::Proxied {
+                    address: tcp_addr,
+                    proxy: proxy.to_owned(),
+                }
+            } else {
+                ServerAddr::Tcp { address: tcp_addr }
+            };
+
+            addr
+        };
+
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let addr = ServerAddr::Ws {
+            address: WS_ADDRESSES[dc_id as usize].to_string(),
+        };
+
+        addr
     };
 
     let (mut sender, request_tx) = if let Some(auth_key) = config.session.dc_auth_key(dc_id) {
@@ -56,22 +109,6 @@ pub(crate) async fn connect_sender(
             dc_id, addr
         );
 
-        #[cfg(feature = "proxy")]
-        if let Some(url) = config.params.proxy_url.as_ref() {
-            sender::connect_via_proxy_with_auth(
-                transport,
-                addr,
-                auth_key,
-                url,
-                config.params.reconnection_policy,
-            )
-            .await?
-        } else {
-            sender::connect_with_auth(transport, addr, auth_key, config.params.reconnection_policy)
-                .await?
-        }
-
-        #[cfg(not(feature = "proxy"))]
         sender::connect_with_auth(transport, addr, auth_key, config.params.reconnection_policy)
             .await?
     } else {
@@ -80,19 +117,32 @@ pub(crate) async fn connect_sender(
             dc_id, addr
         );
 
-        #[cfg(feature = "proxy")]
-        let (sender, tx) = if let Some(url) = config.params.proxy_url.as_ref() {
-            sender::connect_via_proxy(transport, addr, url, config.params.reconnection_policy)
-                .await?
-        } else {
-            sender::connect(transport, addr, config.params.reconnection_policy).await?
-        };
-
-        #[cfg(not(feature = "proxy"))]
         let (sender, tx) =
-            sender::connect(transport, addr, config.params.reconnection_policy).await?;
+            sender::connect(transport, addr.clone(), config.params.reconnection_policy).await?;
 
-        config.session.insert_dc(dc_id, addr, sender.auth_key());
+        match addr {
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            ServerAddr::Tcp { ref address, .. } => {
+                config
+                    .session
+                    .insert_dc_tcp(dc_id, address, sender.auth_key());
+            }
+            #[cfg(all(
+                not(all(target_arch = "wasm32", target_os = "unknown")),
+                feature = "proxy"
+            ))]
+            ServerAddr::Proxied { ref address, .. } => {
+                config
+                    .session
+                    .insert_dc_tcp(dc_id, address, sender.auth_key());
+            }
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            ServerAddr::Ws { ref address } => {
+                config
+                    .session
+                    .insert_dc_ws(dc_id, address, sender.auth_key());
+            }
+        }
         (sender, tx)
     };
 
@@ -158,14 +208,14 @@ impl Client {
         let (sender, request_tx) = connect_sender(dc_id, &config).await?;
         let message_box = if config.params.catch_up {
             if let Some(state) = config.session.get_state() {
-                MessageBox::load(state)
+                MessageBoxes::load(state)
             } else {
-                MessageBox::new()
+                MessageBoxes::new()
             }
         } else {
             // If the user doesn't want to bother with catching up on previous update, start with
             // pristine state instead.
-            MessageBox::new()
+            MessageBoxes::new()
         };
 
         // Pre-allocate the right `VecDeque` size if a limit is given.
@@ -363,7 +413,7 @@ impl Client {
 }
 
 impl Connection {
-    fn new(sender: Sender<transport::Full, mtp::Encrypted>, request_tx: Enqueuer) -> Self {
+    fn new(sender: Sender<Transport, mtp::Encrypted>, request_tx: Enqueuer) -> Self {
         Self {
             sender: AsyncMutex::new(sender),
             request_tx: RwLock::new(request_tx),
@@ -371,7 +421,7 @@ impl Connection {
         }
     }
 
-    pub(crate) async fn invoke<R: tl::RemoteCall, F: Fn(Vec<tl::enums::Updates>)>(
+    pub(crate) async fn invoke<R: tl::RemoteCall, F: Fn(Vec<UpdatesLike>)>(
         &self,
         request: &R,
         flood_sleep_threshold: u32,
@@ -397,7 +447,7 @@ impl Connection {
                             delay,
                             std::any::type_name::<R>()
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep(delay).await;
                         slept_flood = true;
                         rx = self.request_tx.read().unwrap().enqueue(request);
                         continue;
@@ -414,7 +464,7 @@ impl Connection {
         }
     }
 
-    async fn step(&self) -> Result<Vec<tl::enums::Updates>, sender::ReadError> {
+    async fn step(&self) -> Result<Vec<UpdatesLike>, sender::ReadError> {
         let ticket_number = self.step_counter.load(Ordering::SeqCst);
         let mut sender = self.sender.lock().await;
         match self.step_counter.compare_exchange(

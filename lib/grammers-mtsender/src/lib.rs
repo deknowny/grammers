@@ -9,43 +9,37 @@
 #![deny(unsafe_code)]
 
 mod errors;
+mod net;
 mod reconnection;
+pub mod utils;
 
 pub use crate::reconnection::*;
 pub use errors::{AuthorizationError, InvocationError, ReadError, RpcError};
-use futures_util::future::{pending, select, Either};
+use futures_util::future::{Either, pending, select};
 use grammers_crypto::DequeBuffer;
 use grammers_mtproto::mtp::{
     self, BadMessage, Deserialization, DeserializationFailure, Mtp, RpcResult, RpcResultError,
 };
 use grammers_mtproto::transport::{self, Transport};
-use grammers_mtproto::{authentication, MsgId};
+use grammers_mtproto::{MsgId, authentication};
+use grammers_session::UpdatesLike;
 use grammers_tl_types::{self as tl, Deserializable, RemoteCall};
 use log::{debug, error, info, trace, warn};
+use net::NetStream;
+pub use net::ServerAddr;
 use std::io;
 use std::io::Error;
 use std::ops::ControlFlow;
 use std::pin::pin;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::SystemTime;
+use std::time::Duration;
 use tl::Serializable;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
-use tokio::time::{sleep_until, Duration, Instant};
-
-#[cfg(feature = "proxy")]
-use {
-    std::io::ErrorKind,
-    std::net::{IpAddr, SocketAddr},
-    tokio_socks::tcp::Socks5Stream,
-    trust_dns_resolver::config::{ResolverConfig, ResolverOpts},
-    trust_dns_resolver::AsyncResolver,
-    url::Host,
-};
+use utils::{sleep, sleep_until};
+use web_time::{Instant, SystemTime};
 
 /// The maximum data that we're willing to send or receive at once.
 ///
@@ -94,32 +88,13 @@ pub(crate) fn generate_random_id() -> i64 {
     LAST_ID.fetch_add(1, Ordering::SeqCst)
 }
 
-pub enum NetStream {
-    Tcp(TcpStream),
-    #[cfg(feature = "proxy")]
-    ProxySocks5(Socks5Stream<TcpStream>),
-}
-
-impl NetStream {
-    fn split(&mut self) -> (ReadHalf, WriteHalf) {
-        match self {
-            Self::Tcp(stream) => stream.split(),
-            #[cfg(feature = "proxy")]
-            Self::ProxySocks5(stream) => stream.split(),
-        }
-    }
-}
-
-// Manages enqueuing requests, matching them to their response, and IO.
-
+/// Manages enqueuing requests, matching them to their response, and IO.
 pub struct Sender<T: Transport, M: Mtp> {
     stream: NetStream,
     transport: T,
     mtp: M,
-    addr: std::net::SocketAddr,
-    #[cfg(feature = "proxy")]
-    proxy_url: Option<String>,
-    pub requests: Vec<Request>,
+    addr: ServerAddr,
+    requests: Vec<Request>,
     request_rx: mpsc::UnboundedReceiver<Request>,
     next_ping: Instant,
     reconnection_policy: &'static dyn ReconnectionPolicy,
@@ -137,7 +112,7 @@ pub struct Request {
     result: oneshot::Sender<Result<Vec<u8>, InvocationError>>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct MsgIdPair {
     msg_id: MsgId,
     container_msg_id: MsgId,
@@ -188,13 +163,13 @@ impl Enqueuer {
 }
 
 impl<T: Transport, M: Mtp> Sender<T, M> {
-    async fn connect<'a>(
+    async fn connect(
         transport: T,
         mtp: M,
-        addr: std::net::SocketAddr,
+        addr: ServerAddr,
         reconnection_policy: &'static dyn ReconnectionPolicy,
     ) -> Result<(Self, Enqueuer), io::Error> {
-        let stream = connect_stream(&addr).await?;
+        let stream = NetStream::connect(&addr).await?;
         let (tx, rx) = mpsc::unbounded_channel();
         Ok((
             Self {
@@ -202,41 +177,6 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 transport,
                 mtp,
                 addr,
-                #[cfg(feature = "proxy")]
-                proxy_url: None,
-                requests: vec![],
-                request_rx: rx,
-                next_ping: Instant::now() + PING_DELAY,
-                reconnection_policy,
-
-                read_buffer: vec![0; MAXIMUM_DATA],
-                read_tail: 0,
-                write_buffer: DequeBuffer::with_capacity(MAXIMUM_DATA, LEADING_BUFFER_SPACE),
-                write_head: 0,
-            },
-            Enqueuer(tx),
-        ))
-    }
-
-    #[cfg(feature = "proxy")]
-    async fn connect_via_proxy<'a>(
-        transport: T,
-        mtp: M,
-        addr: SocketAddr,
-        proxy_url: &str,
-        reconnection_policy: &'static dyn ReconnectionPolicy,
-    ) -> Result<(Self, Enqueuer), io::Error> {
-        info!("connecting...");
-
-        let stream = connect_proxy_stream(&addr, proxy_url).await?;
-        let (tx, rx) = mpsc::unbounded_channel();
-        Ok((
-            Self {
-                stream,
-                transport,
-                mtp,
-                addr,
-                proxy_url: Some(proxy_url.to_string()),
                 requests: vec![],
                 request_rx: rx,
                 next_ping: Instant::now() + PING_DELAY,
@@ -301,7 +241,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     /// Step network events, writing and reading at the same time.
     ///
     /// Updates received during this step, if any, are returned.
-    pub async fn step(&mut self) -> Result<Vec<tl::enums::Updates>, ReadError> {
+    pub async fn step(&mut self) -> Result<Vec<UpdatesLike>, ReadError> {
         enum Sel {
             Sleep,
             Request(Option<Request>),
@@ -364,17 +304,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     async fn try_connect(&mut self) -> Result<(), Error> {
         let mut attempts = 0;
         loop {
-            #[cfg(feature = "proxy")]
-            let res = if self.proxy_url.is_some() {
-                connect_proxy_stream(&self.addr, self.proxy_url.as_ref().unwrap()).await
-            } else {
-                connect_stream(&self.addr).await
-            };
-
-            #[cfg(not(feature = "proxy"))]
-            let res = connect_stream(&self.addr).await;
-
-            match res {
+            match NetStream::connect(&self.addr).await {
                 Ok(result) => {
                     log::info!(
                         "auto-reconnect success after {} failed attempt(s)",
@@ -386,7 +316,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 Err(e) => {
                     attempts += 1;
                     log::warn!("auto-reconnect failed {} time(s): {}", attempts, e);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    sleep(Duration::from_secs(1)).await;
 
                     match self.reconnection_policy.should_retry(attempts) {
                         ControlFlow::Break(_) => {
@@ -397,7 +327,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                             return Err(e);
                         }
                         ControlFlow::Continue(duration) => {
-                            tokio::time::sleep(duration).await;
+                            sleep(duration).await;
                         }
                     }
                 }
@@ -444,7 +374,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         if let Some(container_msg_id) = self.mtp.finalize(&mut self.write_buffer) {
             for request in self.requests.iter_mut() {
                 match request.state {
-                    RequestState::Serialized(mut pair) => {
+                    RequestState::Serialized(ref mut pair) => {
                         pair.container_msg_id = container_msg_id;
                     }
                     RequestState::NotSerialized | RequestState::Sent(..) => {}
@@ -457,7 +387,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     /// Handle `n` more read bytes being ready to process by the transport.
     ///
     /// This won't cause `ReadError::Io`, but yet another enum would be overkill.
-    fn on_net_read(&mut self, n: usize) -> Result<Vec<tl::enums::Updates>, ReadError> {
+    fn on_net_read(&mut self, n: usize) -> Result<Vec<UpdatesLike>, ReadError> {
         if n == 0 {
             return Err(ReadError::Io(io::Error::new(
                 io::ErrorKind::ConnectionReset,
@@ -476,7 +406,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         while next_offset != self.read_tail {
             match self
                 .transport
-                .unpack(&self.read_buffer[next_offset..self.read_tail])
+                .unpack(&mut self.read_buffer[next_offset..self.read_tail])
             {
                 Ok(offset) => {
                     debug!("deserializing valid transport packet...");
@@ -515,11 +445,11 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         self.write_buffer.clear();
         self.write_head = 0;
         for req in self.requests.iter_mut() {
-            match req.state {
+            match &req.state {
                 RequestState::NotSerialized | RequestState::Sent(_) => {}
                 RequestState::Serialized(pair) => {
                     debug!("sent request with {:?}", pair);
-                    req.state = RequestState::Sent(pair);
+                    req.state = RequestState::Sent(pair.clone());
                 }
             }
         }
@@ -542,7 +472,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     }
 
     /// Handle errors that occured while performing I/O.
-    async fn on_error(&mut self, error: ReadError) -> Result<Vec<tl::enums::Updates>, ReadError> {
+    async fn on_error(&mut self, error: ReadError) -> Result<Vec<UpdatesLike>, ReadError> {
         log::info!("handling error: {error}");
         self.transport.reset();
         self.mtp.reset();
@@ -572,7 +502,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                             .iter_mut()
                             .for_each(|r| r.state = RequestState::NotSerialized);
 
-                        return Ok(Vec::new());
+                        return Ok(vec![UpdatesLike::Reconnection]);
                     }
                     Err(e) => ReadError::from(e),
                 }
@@ -597,10 +527,13 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     fn process_mtp_buffer(
         &mut self,
         results: Vec<Deserialization>,
-        updates: &mut Vec<tl::enums::Updates>,
+        updates: &mut Vec<UpdatesLike>,
     ) {
         for result in results {
             match result {
+                Deserialization::OwnUpdate { msg_id, update } => {
+                    self.process_own_update(updates, msg_id, update)
+                }
                 Deserialization::Update(update) => self.process_update(updates, update),
                 Deserialization::RpcResult(result) => self.process_result(result),
                 Deserialization::RpcError(error) => self.process_error(error),
@@ -610,44 +543,55 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         }
     }
 
-    fn process_update(&mut self, updates: &mut Vec<tl::enums::Updates>, update: Vec<u8>) {
-        let update = match tl::enums::Updates::from_bytes(&update) {
-            Ok(u) => Some(u),
-            Err(e) => {
-                // Annoyingly enough, `messages.affectedMessages` also has `pts`.
-                // Mostly received when deleting messages, so pretend that's the
-                // update that actually occured.
-                match tl::enums::messages::AffectedMessages::from_bytes(&update) {
-                    Ok(tl::enums::messages::AffectedMessages::Messages(
-                        tl::types::messages::AffectedMessages { pts, pts_count },
-                    )) => Some(
-                        tl::types::UpdateShort {
-                            update: tl::types::UpdateDeleteMessages {
-                                messages: Vec::new(),
-                                pts,
-                                pts_count,
-                            }
-                            .into(),
-                            date: 0,
-                        }
-                        .into(),
-                    ),
-                    Err(_) => match tl::types::messages::InvitedUsers::from_bytes(&update) {
-                        Ok(u) => Some(u.updates),
-                        Err(_) => {
-                            warn!(
-                                "telegram sent updates that failed to be deserialized: {}",
-                                e
-                            );
-                            None
-                        }
-                    },
-                }
+    fn process_own_update(
+        &mut self,
+        updates: &mut Vec<UpdatesLike>,
+        msg_id: MsgId,
+        update: Vec<u8>,
+    ) {
+        match (
+            tl::enums::Updates::from_bytes(&update),
+            self.peek_request(msg_id).and_then(|request| {
+                tl::functions::messages::SendMessage::from_bytes(&request.body).ok()
+            }),
+        ) {
+            (Ok(tl::enums::Updates::UpdateShortSentMessage(u)), Some(request)) => {
+                // As far as I know, UpdateShortSentMessage can only occur from SendMessage.
+                // If that's not the case, new variants with additional requests should be added.
+                updates.push(UpdatesLike::ShortSentMessage { request, update: u })
             }
-        };
+            (Ok(u), _) => {
+                // In the future, we might want to flag "updates produced by the client" somehow.
+                // This would be the starting place to do it.
+                updates.push(UpdatesLike::Updates(u));
+                return;
+            }
+            (Err(e), _) => warn!("telegram sent updates that failed to be deserialized: {e}"),
+        }
 
-        if let Some(update) = update {
-            updates.push(update);
+        match tl::enums::messages::AffectedMessages::from_bytes(&update) {
+            Ok(tl::enums::messages::AffectedMessages::Messages(u)) => {
+                updates.push(UpdatesLike::AffectedMessages(u));
+                return;
+            }
+            Err(_) => {}
+        }
+
+        match tl::types::messages::InvitedUsers::from_bytes(&update) {
+            Ok(u) => {
+                updates.push(UpdatesLike::InvitedUsers(u));
+                return;
+            }
+            Err(_) => {}
+        }
+
+        warn!("telegram sent an unknown or invalid updates-like type for a response");
+    }
+
+    fn process_update(&mut self, updates: &mut Vec<UpdatesLike>, update: Vec<u8>) {
+        match tl::enums::Updates::from_bytes(&update) {
+            Ok(u) => updates.push(UpdatesLike::Updates(u)),
+            Err(e) => warn!("telegram sent updates that failed to be deserialized: {e}"),
         }
     }
 
@@ -691,7 +635,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
     fn process_bad_message(&mut self, bad_msg: BadMessage) {
         for i in (0..self.requests.len()).rev() {
-            match self.requests[i].state {
+            match &self.requests[i].state {
                 RequestState::Serialized(pair)
                     if pair.msg_id == bad_msg.msg_id || pair.container_msg_id == bad_msg.msg_id =>
                 {
@@ -752,14 +696,22 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         }
     }
 
+    fn peek_request(&mut self, msg_id: MsgId) -> Option<&Request> {
+        self.requests.iter().find(|request| match request.state {
+            RequestState::NotSerialized => todo!(),
+            RequestState::Serialized(MsgIdPair { msg_id: m, .. }) => m == msg_id,
+            RequestState::Sent(MsgIdPair { msg_id: m, .. }) => m == msg_id,
+        })
+    }
+
     fn pop_request(&mut self, msg_id: MsgId) -> Option<Request> {
         for i in 0..self.requests.len() {
-            match self.requests[i].state {
+            match &self.requests[i].state {
                 RequestState::Serialized(pair) if pair.msg_id == msg_id => {
                     panic!("got response {msg_id:?} for unsent request {pair:?}");
                 }
                 RequestState::Sent(pair) if pair.msg_id == msg_id => {
-                    return Some(self.requests.swap_remove(i))
+                    return Some(self.requests.swap_remove(i));
                 }
                 _ => {}
             }
@@ -777,85 +729,11 @@ impl<T: Transport> Sender<T, mtp::Encrypted> {
 
 pub async fn connect<T: Transport>(
     transport: T,
-    addr: std::net::SocketAddr,
+    addr: ServerAddr,
     rc_policy: &'static dyn ReconnectionPolicy,
 ) -> Result<(Sender<T, mtp::Encrypted>, Enqueuer), AuthorizationError> {
     let (sender, enqueuer) = Sender::connect(transport, mtp::Plain::new(), addr, rc_policy).await?;
     generate_auth_key(sender, enqueuer).await
-}
-
-#[cfg(feature = "proxy")]
-pub async fn connect_via_proxy<'a, T: Transport>(
-    transport: T,
-    addr: std::net::SocketAddr,
-    proxy_url: &str,
-    rc_policy: &'static dyn ReconnectionPolicy,
-) -> Result<(Sender<T, mtp::Encrypted>, Enqueuer), AuthorizationError> {
-    let (sender, enqueuer) =
-        Sender::connect_via_proxy(transport, mtp::Plain::new(), addr, proxy_url, rc_policy).await?;
-    generate_auth_key(sender, enqueuer).await
-}
-
-async fn connect_stream(addr: &std::net::SocketAddr) -> Result<NetStream, std::io::Error> {
-    info!("connecting...");
-    Ok(NetStream::Tcp(TcpStream::connect(addr).await?))
-}
-
-#[cfg(feature = "proxy")]
-async fn connect_proxy_stream(
-    addr: &SocketAddr,
-    proxy_url: &str,
-) -> Result<NetStream, std::io::Error> {
-    let proxy =
-        url::Url::parse(proxy_url).map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-    let scheme = proxy.scheme();
-    let host = proxy.host().ok_or(io::Error::new(
-        ErrorKind::NotFound,
-        format!("proxy host is missing from url: {}", proxy_url),
-    ))?;
-    let port = proxy.port().ok_or(io::Error::new(
-        ErrorKind::NotFound,
-        format!("proxy port is missing from url: {}", proxy_url),
-    ))?;
-    let username = proxy.username();
-    let password = proxy.password().unwrap_or("");
-    let socks_addr = match host {
-        Host::Domain(domain) => {
-            let resolver = AsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
-            let response = resolver.lookup_ip(domain).await?;
-            let socks_ip_addr = response.into_iter().next().ok_or(io::Error::new(
-                ErrorKind::NotFound,
-                format!("proxy host did not return any ip address: {}", domain),
-            ))?;
-            SocketAddr::new(socks_ip_addr, port)
-        }
-        Host::Ipv4(v4) => SocketAddr::new(IpAddr::from(v4), port),
-        Host::Ipv6(v6) => SocketAddr::new(IpAddr::from(v6), port),
-    };
-
-    match scheme {
-        "socks5" => {
-            if username.is_empty() {
-                Ok(NetStream::ProxySocks5(
-                    tokio_socks::tcp::Socks5Stream::connect(socks_addr, addr)
-                        .await
-                        .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))?,
-                ))
-            } else {
-                Ok(NetStream::ProxySocks5(
-                    tokio_socks::tcp::Socks5Stream::connect_with_password(
-                        socks_addr, addr, username, password,
-                    )
-                    .await
-                    .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))?,
-                ))
-            }
-        }
-        scheme => Err(io::Error::new(
-            ErrorKind::ConnectionAborted,
-            format!("proxy scheme not supported: {}", scheme),
-        )),
-    }
 }
 
 pub async fn generate_auth_key<T: Transport>(
@@ -898,8 +776,6 @@ pub async fn generate_auth_key<T: Transport>(
             write_buffer: sender.write_buffer,
             write_head: sender.write_head,
             addr: sender.addr,
-            #[cfg(feature = "proxy")]
-            proxy_url: sender.proxy_url,
             reconnection_policy: sender.reconnection_policy,
         },
         enqueuer,
@@ -908,7 +784,7 @@ pub async fn generate_auth_key<T: Transport>(
 
 pub async fn connect_with_auth<T: Transport>(
     transport: T,
-    addr: std::net::SocketAddr,
+    addr: ServerAddr,
     auth_key: [u8; 256],
     rc_policy: &'static dyn ReconnectionPolicy,
 ) -> Result<(Sender<T, mtp::Encrypted>, Enqueuer), io::Error> {
@@ -916,24 +792,6 @@ pub async fn connect_with_auth<T: Transport>(
         transport,
         mtp::Encrypted::build().finish(auth_key),
         addr,
-        rc_policy,
-    )
-    .await
-}
-
-#[cfg(feature = "proxy")]
-pub async fn connect_via_proxy_with_auth<'a, T: Transport>(
-    transport: T,
-    addr: std::net::SocketAddr,
-    auth_key: [u8; 256],
-    proxy_url: &str,
-    rc_policy: &'static dyn ReconnectionPolicy,
-) -> Result<(Sender<T, mtp::Encrypted>, Enqueuer), io::Error> {
-    Sender::connect_via_proxy(
-        transport,
-        mtp::Encrypted::build().finish(auth_key),
-        addr,
-        proxy_url,
         rc_policy,
     )
     .await
