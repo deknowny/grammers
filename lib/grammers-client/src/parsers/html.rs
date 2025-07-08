@@ -24,13 +24,6 @@ use html5ever::tokenizer::{
 // match against those, but that would defeat the purpose. We do however
 // give the atoms we use better names.
 use html5ever::{
-    ATOM_LOCALNAME__61 as TAG_A, ATOM_LOCALNAME__62 as TAG_B,
-    ATOM_LOCALNAME__62_6C_6F_63_6B_71_75_6F_74_65 as TAG_BLOCKQUOTE,
-    ATOM_LOCALNAME__63_6C_61_73_73 as ATTR_CLASS, ATOM_LOCALNAME__63_6F_64_65 as TAG_CODE,
-    ATOM_LOCALNAME__64_65_6C as TAG_DEL, ATOM_LOCALNAME__64_65_74_61_69_6C_73 as TAG_DETAILS,
-    ATOM_LOCALNAME__65_6D as TAG_EM, ATOM_LOCALNAME__68_72_65_66 as ATTR_HREF,
-    ATOM_LOCALNAME__69 as TAG_I, ATOM_LOCALNAME__70_72_65 as TAG_PRE, ATOM_LOCALNAME__73 as TAG_S,
-    ATOM_LOCALNAME__73_74_72_6F_6E_67 as TAG_STRONG, ATOM_LOCALNAME__75 as TAG_U,
     ATOM_LOCALNAME__69_63_6F_6E as TAG_EMOJI,  // icon
     ATOM_LOCALNAME__69_64 as ATTR_ID
 };
@@ -153,7 +146,7 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
                             .map(|a| a.value.to_string())
                             .unwrap_or_else(|| "".to_string());
                         let document_id = raw_id.parse::<i64>().unwrap();
-                        self.entities.push(
+                        entities.push(
                             tl::types::MessageEntityCustomEmoji {
                                 offset,
                                 length,
@@ -213,7 +206,7 @@ pub fn parse_html_message(message: &str) -> (String, Vec<tl::enums::MessageEntit
                         }
                     }
                     TAG_EMOJI => {
-                        update_entity_len!(CustomEmoji(self.offset) in self.entities);
+                        update_entity_len!(CustomEmoji(offset) in entities);
                     }
                     _ => {}
                 },
