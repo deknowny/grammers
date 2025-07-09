@@ -64,6 +64,8 @@ impl From<Attribute> for tl::enums::DocumentAttribute {
                 w,
                 h,
                 preload_prefix_size: None,
+                video_start_ts: None,
+                video_codec: None
             }),
             FileName(file_name) => {
                 Self::Filename(tl::types::DocumentAttributeFilename { file_name })

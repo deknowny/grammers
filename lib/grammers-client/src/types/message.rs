@@ -98,6 +98,8 @@ impl Message {
                     offline: false,
                     effect: None,
                     factcheck: None,
+                    video_processing_pending: false,
+                    report_delivery_until_date: None
                 },
                 raw_action: Some(msg.action),
                 client: client.clone(),
@@ -167,6 +169,8 @@ impl Message {
                 offline: false,
                 effect: None,
                 factcheck: None,
+                video_processing_pending: false,
+                report_delivery_until_date: None
             },
             raw_action: None,
             client: client.clone(),

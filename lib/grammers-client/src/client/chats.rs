@@ -356,6 +356,7 @@ impl Client {
         let tl::types::contacts::ResolvedPeer { peer, users, chats } = match self
             .invoke(&tl::functions::contacts::ResolveUsername {
                 username: username.into(),
+                referer: None
             })
             .await
         {

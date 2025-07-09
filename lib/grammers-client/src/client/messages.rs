@@ -388,6 +388,8 @@ impl GlobalSearchIter {
                 offset_id: 0,
                 limit: 0,
                 broadcasts_only: false,
+                groups_only: false,
+                users_only: false,
             },
         )
     }
@@ -509,6 +511,7 @@ impl Client {
                 invert_media: message.invert_media,
                 quick_reply_shortcut: None,
                 effect: None,
+                allow_paid_floodskip: false,
             })
             .await
         } else {
@@ -540,6 +543,7 @@ impl Client {
                 invert_media: message.invert_media,
                 quick_reply_shortcut: None,
                 effect: None,
+                allow_paid_floodskip: false,
             })
             .await
         }?;
@@ -593,6 +597,7 @@ impl Client {
                 invert_media: false,
                 quick_reply_shortcut: None,
                 effect: None,
+                allow_paid_floodskip: false
             })
             .await
         } else {
@@ -624,6 +629,7 @@ impl Client {
                 invert_media: false,
                 quick_reply_shortcut: None,
                 effect: None,
+                allow_paid_floodskip: false
             })
             .await
         }?;
@@ -785,6 +791,8 @@ impl Client {
             send_as: None,
             noforwards: false,
             quick_reply_shortcut: None,
+            allow_paid_floodskip: false,
+            video_timestamp: None
         };
         let result = self.invoke(&request).await?;
         Ok(map_random_ids_to_messages(self, &request.random_id, result))
