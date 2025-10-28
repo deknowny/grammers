@@ -198,7 +198,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn request_login_code(&self, phone: &str) -> Result<LoginToken, AuthorizationError> {
+    pub async fn request_login_code(&self, phone: &str) -> Result<(LoginToken, tl::types::auth::SentCode), AuthorizationError> {
         let request = tl::functions::auth::SendCode {
             phone_number: phone.to_string(),
             api_id: self.0.config.api_id,
@@ -247,10 +247,10 @@ impl Client {
             Err(e) => return Err(e.into()),
         };
 
-        Ok(LoginToken {
+        Ok((LoginToken {
             phone: phone.to_string(),
-            phone_code_hash: sent_code.phone_code_hash,
-        })
+            phone_code_hash: sent_code.phone_code_hash.clone(),
+        }, sent_code))
     }
 
     /// Signs in to the user account.
@@ -276,7 +276,7 @@ impl Client {
     /// let token = client.request_login_code(PHONE).await?;
     /// let code = ask_code_to_user();
     ///
-    /// let user = match client.sign_in(&token, &code).await {
+    /// let user = match client.sign_in(&token.0, &code).await {
     ///     Ok(user) => user,
     ///     Err(SignInError::PasswordRequired(_token)) => panic!("Please provide a password"),
     ///     Err(SignInError::SignUpRequired { terms_of_service: tos }) => panic!("Sign up required"),
@@ -351,7 +351,7 @@ impl Client {
     ///
     /// // ... enter phone number, request login code ...
     ///
-    /// let user = match client.sign_in(&token, &code).await {
+    /// let user = match client.sign_in(&token.0, &code).await {
     ///     Err(SignInError::PasswordRequired(password_token) ) => {
     ///         let mut password = get_user_password(password_token.hint().unwrap());
     ///
