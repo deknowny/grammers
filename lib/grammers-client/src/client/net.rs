@@ -27,6 +27,7 @@ use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 ///
 /// The addresses were obtained from the `static` addresses through a call to
 /// `functions::help::GetConfig`.
+#[cfg(not(feature = "test_dc"))]
 const DC_ADDRESSES: [(Ipv4Addr, u16); 6] = [
     (Ipv4Addr::new(0, 0, 0, 0), 0),
     (Ipv4Addr::new(149, 154, 175, 53), 443),
@@ -34,6 +35,14 @@ const DC_ADDRESSES: [(Ipv4Addr, u16); 6] = [
     (Ipv4Addr::new(149, 154, 175, 100), 443),
     (Ipv4Addr::new(149, 154, 167, 92), 443),
     (Ipv4Addr::new(91, 108, 56, 190), 443),
+];
+
+#[cfg(feature = "test_dc")]
+const DC_ADDRESSES: [(Ipv4Addr, u16); 6] = [
+    (Ipv4Addr::new(0, 0, 0, 0), 0),
+    (Ipv4Addr::new(149, 154, 175, 10), 80),
+    (Ipv4Addr::new(149, 154, 167, 40), 443),
+    (Ipv4Addr::new(149, 154, 175, 117), 443),
 ];
 
 const DEFAULT_DC: i32 = 2;
