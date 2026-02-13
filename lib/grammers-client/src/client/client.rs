@@ -132,7 +132,7 @@ pub struct ClientInner {
 
 pub struct ClientState {
     pub(crate) dc_id: i32,
-    pub(crate) message_box: MessageBox,
+    pub message_box: MessageBox,
     pub chat_hashes: ChatHashCache,
     // When did we last warn the user that the update queue filled up?
     // This is used to avoid spamming the log.
