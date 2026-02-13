@@ -101,7 +101,7 @@ pub enum NetStream {
 }
 
 impl NetStream {
-    fn split(&mut self) -> (ReadHalf, WriteHalf) {
+    pub fn split(&mut self) -> (ReadHalf, WriteHalf) {
         match self {
             Self::Tcp(stream) => stream.split(),
             #[cfg(feature = "proxy")]
@@ -113,7 +113,7 @@ impl NetStream {
 // Manages enqueuing requests, matching them to their response, and IO.
 
 pub struct Sender<T: Transport, M: Mtp> {
-    stream: NetStream,
+    pub stream: NetStream,
     transport: T,
     mtp: M,
     addr: std::net::SocketAddr,
