@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Telegram sends `seq` equal to `0` when "it doesn't matter", so we use that value too.
-pub(super) const NO_SEQ: i32 = 0;
+pub const NO_SEQ: i32 = 0;
 
 /// It has been observed that Telegram may send updates with `qts` equal to `0` (for
 /// example with `ChannelParticipant`), interleaved with non-zero `qts` values. This
@@ -19,19 +19,19 @@ pub(super) const NO_SEQ: i32 = 0;
 /// One can speculate this is done because the field is not optional in the TL definition.
 ///
 /// Not ignoring the `pts` information in those updates can lead to failures resolving gaps.
-pub(super) const NO_PTS: i32 = 0;
+pub const NO_PTS: i32 = 0;
 
 /// Non-update types like `messages.affectedMessages` can contain `pts` that should still be
 /// processed. Because there's no `date`, a value of `0` is used as the sentinel value for
 /// the `date` when constructing the dummy `Updates` (in order to handle them uniformly).
-pub(super) const NO_DATE: i32 = 0;
+pub const NO_DATE: i32 = 0;
 
 // See https://core.telegram.org/method/updates.getChannelDifference.
-pub(super) const BOT_CHANNEL_DIFF_LIMIT: i32 = 100000;
-pub(super) const USER_CHANNEL_DIFF_LIMIT: i32 = 100;
+pub const BOT_CHANNEL_DIFF_LIMIT: i32 = 100000;
+pub const USER_CHANNEL_DIFF_LIMIT: i32 = 100;
 
 // > It may be useful to wait up to 0.5 seconds
-pub(super) const POSSIBLE_GAP_TIMEOUT: Duration = Duration::from_millis(500);
+pub const POSSIBLE_GAP_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// After how long without updates the client will "timeout".
 ///
@@ -40,11 +40,11 @@ pub(super) const POSSIBLE_GAP_TIMEOUT: Duration = Duration::from_millis(500);
 /// client will resume normal operation, and the timeout will reset.
 ///
 /// Documentation recommends 15 minutes without updates (https://core.telegram.org/api/updates).
-pub(super) const NO_UPDATES_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+pub const NO_UPDATES_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// A [`MessageBox`] entry key.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Entry {
+pub enum Entry {
     /// Account-wide `pts`.
     ///
     /// This includes private conversations (one-to-one) and small group chats.
@@ -93,20 +93,20 @@ pub struct MessageBox {
 
 /// Represents the information needed to correctly handle a specific `tl::enums::Update`.
 #[derive(Debug)]
-pub(super) struct PtsInfo {
-    pub(super) pts: i32,
-    pub(super) pts_count: i32,
-    pub(super) entry: Entry,
+pub struct PtsInfo {
+    pub pts: i32,
+    pub pts_count: i32,
+    pub entry: Entry,
 }
 
 /// The state of a particular entry in the message box.
 #[derive(Debug)]
-pub(super) struct State {
+pub struct State {
     /// Current local persistent timestamp.
-    pub(super) pts: i32,
+    pub pts: i32,
 
     /// Next instant when we would get the update difference if no updates arrived before then.
-    pub(super) deadline: Instant,
+    pub deadline: Instant,
 }
 
 // > ### Recovering gaps
@@ -118,17 +118,17 @@ pub(super) struct State {
 // This is really easy to trigger by spamming messages in a channel (with as little as 3 members works), because
 // the updates produced by the RPC request take a while to arrive (whereas the read update comes faster alone).
 #[derive(Debug)]
-pub(super) struct PossibleGap {
-    pub(super) deadline: Instant,
+pub struct PossibleGap {
+    pub deadline: Instant,
     /// Pending updates (those with a larger PTS, producing the gap which may later be filled).
-    pub(super) updates: Vec<tl::enums::Update>,
+    pub updates: Vec<tl::enums::Update>,
 }
 
 #[derive(Debug)]
 pub struct Gap;
 
 /// Alias for the commonly-referenced three-tuple of update and related peers.
-pub(super) type UpdateAndPeers = (
+pub type UpdateAndPeers = (
     Vec<tl::enums::Update>,
     Vec<tl::enums::User>,
     Vec<tl::enums::Chat>,
