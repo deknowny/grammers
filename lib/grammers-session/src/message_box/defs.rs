@@ -65,11 +65,11 @@ pub(crate) enum Entry {
 #[derive(Debug)]
 pub struct MessageBox {
     /// Map each entry to their current state.
-    pub(super) map: HashMap<Entry, State>,
+    pub map: HashMap<Entry, State>,
 
     // Additional fields beyond PTS needed by `Entry::AccountWide`.
-    pub(super) date: i32,
-    pub(super) seq: i32,
+    pub date: i32,
+    pub seq: i32,
 
     /// Which entries have a gap and may soon trigger a need to get difference.
     ///
@@ -78,17 +78,17 @@ pub struct MessageBox {
     ///
     /// Not stored directly in `map` as an optimization (else we would need another way of knowing which entries have
     /// a gap in them).
-    pub(super) possible_gaps: HashMap<Entry, PossibleGap>,
+    pub possible_gaps: HashMap<Entry, PossibleGap>,
 
     /// For which entries are we currently getting difference.
-    pub(super) getting_diff_for: HashSet<Entry>,
+    pub getting_diff_for: HashSet<Entry>,
 
     /// Holds the entry with the closest deadline.
     /// This field is merely an optimization, to avoid recalculating the closest deadline.
-    pub(super) next_deadline: Option<Entry>,
+    pub next_deadline: Option<Entry>,
 
     /// This field is merely an optimization, to reuse the same allocation.
-    pub(super) tmp_entries: HashSet<Entry>,
+    pub tmp_entries: HashSet<Entry>,
 }
 
 /// Represents the information needed to correctly handle a specific `tl::enums::Update`.
