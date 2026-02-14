@@ -13,6 +13,8 @@ mod reconnection;
 
 pub use crate::reconnection::*;
 pub use errors::{AuthorizationError, InvocationError, ReadError, RpcError};
+
+use bytes::{Buf as _, BytesMut};
 use futures_util::future::{pending, select, Either};
 use grammers_crypto::DequeBuffer;
 use grammers_mtproto::mtp::{
@@ -27,7 +29,7 @@ use std::io::Error;
 use std::ops::ControlFlow;
 use std::pin::pin;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tl::Serializable;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
@@ -47,15 +49,8 @@ use {
     url::Host,
 };
 
-/// The maximum data that we're willing to send or receive at once.
-///
-/// By having a fixed-size buffer, we can avoid unnecessary allocations
-/// and trivially prevent allocating more than this limit if we ever
-/// received invalid data.
-///
-/// Telegram will close the connection with roughly a megabyte of data,
-/// so to account for the transports' own overhead, we add a few extra
-/// kilobytes to the maximum data size.
+/// Hard upper bound for how much we are willing to buffer in memory for a single connection.
+/// This is NOT pre-allocated.
 const MAXIMUM_DATA: usize = (1024 * 1024) + (8 * 1024);
 
 /// How much leading space should be reserved in a buffer to avoid moving memory.
@@ -68,13 +63,17 @@ const LEADING_BUFFER_SPACE: usize = mtp::MAX_TRANSPORT_HEADER_LEN
 const PING_DELAY: Duration = Duration::from_secs(60);
 
 /// After how many seconds should the server close the connection when we send a ping?
-///
-/// What this value essentially means is that we have `NO_PING_DISCONNECT - PING_DELAY` seconds
-/// to keep sending pings, or the server will close the connection.
-///
-/// Pings ensure the connection is kept active, and the delayed disconnect ensures the messages
-/// are getting through consistently enough.
 const NO_PING_DISCONNECT: i32 = 75;
+
+/// Read buffer starts small and grows as needed (no 1MB prealloc).
+const READ_INITIAL_CAPACITY: usize = 16 * 1024;
+/// If we had a one-off huge receive, drop capacity afterwards.
+const READ_SHRINK_THRESHOLD: usize = 256 * 1024;
+
+/// Write buffer also starts small (DequeBuffer grows automatically via Vec).
+const WRITE_INITIAL_BACK_CAPACITY: usize = 64 * 1024;
+/// If we just sent something huge, recreate the buffer to drop Vec capacity.
+const WRITE_SHRINK_ON_SEND_OVER: usize = 256 * 1024;
 
 /// Generate a "random" ping ID.
 pub(crate) fn generate_random_id() -> i64 {
@@ -82,7 +81,7 @@ pub(crate) fn generate_random_id() -> i64 {
 
     if LAST_ID.load(Ordering::SeqCst) == 0 {
         let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
             .expect("system time is before epoch")
             .as_nanos() as i64;
 
@@ -117,16 +116,19 @@ pub struct Sender<T: Transport, M: Mtp> {
     transport: T,
     mtp: M,
     addr: std::net::SocketAddr,
+
     #[cfg(feature = "proxy")]
     proxy_url: Option<String>,
+
     pub requests: Vec<Request>,
     request_rx: mpsc::UnboundedReceiver<Request>,
     next_ping: Instant,
     reconnection_policy: &'static dyn ReconnectionPolicy,
 
-    // Transport-level buffers and positions
-    pub read_buffer: Vec<u8>,
-    pub read_tail: usize,
+    // READ: grow-on-demand, keep only unread tail, no prealloc of MAXIMUM_DATA.
+    read_buf: BytesMut,
+
+    // WRITE: grow-on-demand via Vec growth inside DequeBuffer, no prealloc of MAXIMUM_DATA.
     pub write_buffer: DequeBuffer<u8>,
     pub write_head: usize,
 }
@@ -155,7 +157,7 @@ impl MsgIdPair {
     fn new(msg_id: MsgId) -> Self {
         Self {
             msg_id,
-            container_msg_id: msg_id, // by default, no container (so the last msg_id is itself)
+            container_msg_id: msg_id, // by default, no container
         }
     }
 }
@@ -166,14 +168,10 @@ impl Enqueuer {
         &self,
         request: &R,
     ) -> oneshot::Receiver<Result<Vec<u8>, InvocationError>> {
-        // TODO we probably want a bound here (to not enqueue more than N at once)
         let body = request.to_bytes();
         assert!(body.len() >= 4);
         let req_id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
-        debug!(
-            "enqueueing request {} to be serialized",
-            tl::name_for_id(req_id)
-        );
+        debug!("enqueueing request {} to be serialized", tl::name_for_id(req_id));
 
         let (tx, rx) = oneshot::channel();
         if let Err(err) = self.0.send(Request {
@@ -188,7 +186,7 @@ impl Enqueuer {
 }
 
 impl<T: Transport, M: Mtp> Sender<T, M> {
-    async fn connect<'a>(
+    async fn connect(
         transport: T,
         mtp: M,
         addr: std::net::SocketAddr,
@@ -209,9 +207,12 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 next_ping: Instant::now() + PING_DELAY,
                 reconnection_policy,
 
-                read_buffer: vec![0; MAXIMUM_DATA],
-                read_tail: 0,
-                write_buffer: DequeBuffer::with_capacity(MAXIMUM_DATA, LEADING_BUFFER_SPACE),
+                read_buf: BytesMut::with_capacity(READ_INITIAL_CAPACITY),
+
+                write_buffer: DequeBuffer::with_capacity(
+                    WRITE_INITIAL_BACK_CAPACITY,
+                    LEADING_BUFFER_SPACE,
+                ),
                 write_head: 0,
             },
             Enqueuer(tx),
@@ -219,7 +220,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     }
 
     #[cfg(feature = "proxy")]
-    async fn connect_via_proxy<'a>(
+    async fn connect_via_proxy(
         transport: T,
         mtp: M,
         addr: SocketAddr,
@@ -227,7 +228,6 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         reconnection_policy: &'static dyn ReconnectionPolicy,
     ) -> Result<(Self, Enqueuer), io::Error> {
         info!("connecting...");
-
         let stream = connect_proxy_stream(&addr, proxy_url).await?;
         let (tx, rx) = mpsc::unbounded_channel();
         Ok((
@@ -242,9 +242,12 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 next_ping: Instant::now() + PING_DELAY,
                 reconnection_policy,
 
-                read_buffer: vec![0; MAXIMUM_DATA],
-                read_tail: 0,
-                write_buffer: DequeBuffer::with_capacity(MAXIMUM_DATA, LEADING_BUFFER_SPACE),
+                read_buf: BytesMut::with_capacity(READ_INITIAL_CAPACITY),
+
+                write_buffer: DequeBuffer::with_capacity(
+                    WRITE_INITIAL_BACK_CAPACITY,
+                    LEADING_BUFFER_SPACE,
+                ),
                 write_head: 0,
             },
             Enqueuer(tx),
@@ -268,10 +271,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     ) -> oneshot::Receiver<Result<Vec<u8>, InvocationError>> {
         assert!(body.len() >= 4);
         let req_id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
-        debug!(
-            "enqueueing request {} to be serialized",
-            tl::name_for_id(req_id)
-        );
+        debug!("enqueueing request {} to be serialized", tl::name_for_id(req_id));
 
         let (tx, rx) = oneshot::channel();
         self.requests.push(Request {
@@ -287,13 +287,11 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         mut rx: oneshot::Receiver<Result<Vec<u8>, InvocationError>>,
     ) -> Result<Vec<u8>, InvocationError> {
         loop {
-            self.step().await?;
+            self.step().await.map_err(InvocationError::from)?;
             match rx.try_recv() {
                 Ok(x) => break x,
                 Err(TryRecvError::Empty) => continue,
-                Err(TryRecvError::Closed) => {
-                    panic!("request channel dropped before receiving a result")
-                }
+                Err(TryRecvError::Closed) => panic!("request channel dropped before receiving a result"),
             }
         }
     }
@@ -310,18 +308,26 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         }
 
         self.try_fill_write();
-        let write_len = self.write_buffer.len() - self.write_head;
-        trace!(
-            "reading bytes and sending up to {} bytes via network",
-            write_len
-        );
+        let write_len = self.write_buffer.len().saturating_sub(self.write_head);
+        trace!("reading bytes and sending up to {} bytes via network", write_len);
 
         let (mut reader, mut writer) = self.stream.split();
         let sel = {
             let sleep = pin!(async { sleep_until(self.next_ping).await });
             let recv_req = pin!(async { self.request_rx.recv().await });
-            let recv_data =
-                pin!(async { reader.read(&mut self.read_buffer[self.read_tail..]).await });
+
+            let recv_data = pin!(async {
+                if self.read_buf.len() >= MAXIMUM_DATA {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "incoming buffer exceeds MAXIMUM_DATA",
+                    ));
+                }
+                // Reserve in small chunks (no huge prealloc).
+                self.read_buf.reserve(16 * 1024);
+                reader.read_buf(&mut self.read_buf).await
+            });
+
             let send_data = pin!(async {
                 if self.write_buffer.is_empty() {
                     pending().await
@@ -376,10 +382,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
             match res {
                 Ok(result) => {
-                    log::info!(
-                        "auto-reconnect success after {} failed attempt(s)",
-                        attempts
-                    );
+                    log::info!("auto-reconnect success after {} failed attempt(s)", attempts);
                     self.stream = result;
                     return Ok(());
                 }
@@ -396,9 +399,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                             );
                             return Err(e);
                         }
-                        ControlFlow::Continue(duration) => {
-                            tokio::time::sleep(duration).await;
-                        }
+                        ControlFlow::Continue(duration) => tokio::time::sleep(duration).await,
                     }
                 }
             }
@@ -411,13 +412,12 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
             return;
         }
 
-        // TODO add a test to make sure we only ever send the same request once
         for request in self
             .requests
             .iter_mut()
             .filter(|r| matches!(r.state, RequestState::NotSerialized))
         {
-            // TODO make mtp itself use BytesMut to avoid copies
+            // DequeBuffer grows automatically; no need to prealloc MAXIMUM_DATA.
             if let Some(msg_id) = self.mtp.push(&mut self.write_buffer, &request.body) {
                 assert!(request.body.len() >= 4);
                 let req_id = u32::from_le_bytes([
@@ -432,9 +432,6 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                     tl::name_for_id(req_id),
                     msg_id
                 );
-                // Note how only NotSerialized become Serialized.
-                // Nasty bugs that take ~2h to find occur otherwise!
-                // (e.g. infinite loops leading to transport flood.)
                 request.state = RequestState::Serialized(MsgIdPair::new(msg_id));
             } else {
                 break;
@@ -456,7 +453,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
     /// Handle `n` more read bytes being ready to process by the transport.
     ///
-    /// This won't cause `ReadError::Io`, but yet another enum would be overkill.
+    /// This keeps only the unread tail in memory. Large frames do not "break" the logic:
+    /// we keep buffering until `transport.unpack` stops returning `MissingBytes`, up to MAXIMUM_DATA.
     fn on_net_read(&mut self, n: usize) -> Result<Vec<tl::enums::Updates>, ReadError> {
         if n == 0 {
             return Err(ReadError::Io(io::Error::new(
@@ -465,35 +463,54 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
             )));
         }
 
-        self.read_tail += n;
         trace!("read {} bytes from the network", n);
-        trace!("trying to unpack buffer of {} bytes...", self.read_tail);
+        trace!("trying to unpack buffer of {} bytes...", self.read_buf.len());
 
-        // TODO the buffer might have multiple transport packets, what should happen with the
-        // updates successfully read if subsequent packets fail to be deserialized properly?
         let mut updates = Vec::new();
-        let mut next_offset = 0;
-        while next_offset != self.read_tail {
-            match self
-                .transport
-                .unpack(&self.read_buffer[next_offset..self.read_tail])
-            {
+        let mut consumed = 0usize;
+
+        loop {
+            let buf = &self.read_buf[consumed..];
+            if buf.is_empty() {
+                break;
+            }
+
+            match self.transport.unpack(buf) {
                 Ok(offset) => {
                     debug!("deserializing valid transport packet...");
-                    let result = self.mtp.deserialize(
-                        &self.read_buffer[next_offset..][offset.data_start..offset.data_end],
-                    )?;
-
+                    let payload = &buf[offset.data_start..offset.data_end];
+                    let result = self.mtp.deserialize(payload)?;
                     self.process_mtp_buffer(result, &mut updates);
-                    next_offset += offset.next_offset;
+
+                    consumed = consumed
+                        .checked_add(offset.next_offset)
+                        .ok_or_else(|| {
+                            ReadError::Io(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "overflow while advancing read buffer",
+                            ))
+                        })?;
+
+                    if consumed > self.read_buf.len() {
+                        return Err(ReadError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "transport.unpack consumed beyond buffer",
+                        )));
+                    }
                 }
                 Err(transport::Error::MissingBytes) => break,
                 Err(err) => return Err(err.into()),
             }
         }
 
-        self.read_buffer.copy_within(next_offset..self.read_tail, 0);
-        self.read_tail -= next_offset;
+        if consumed > 0 {
+            self.read_buf.advance(consumed);
+
+            // If we had a large one-off packet, don't keep huge capacity forever.
+            if self.read_buf.is_empty() && self.read_buf.capacity() > READ_SHRINK_THRESHOLD {
+                self.read_buf = BytesMut::with_capacity(READ_INITIAL_CAPACITY);
+            }
+        }
 
         Ok(updates)
     }
@@ -512,8 +529,20 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
             return;
         }
 
+        // We finished sending the whole buffer.
+        let sent_len = self.write_buffer.len();
+
         self.write_buffer.clear();
         self.write_head = 0;
+
+        // If the buffer had to grow a lot for a one-off big send, recreate it to drop Vec capacity.
+        if sent_len > WRITE_SHRINK_ON_SEND_OVER {
+            self.write_buffer = DequeBuffer::with_capacity(
+                WRITE_INITIAL_BACK_CAPACITY,
+                LEADING_BUFFER_SPACE,
+            );
+        }
+
         for req in self.requests.iter_mut() {
             match req.state {
                 RequestState::NotSerialized | RequestState::Sent(_) => {}
@@ -544,17 +573,18 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     /// Handle errors that occured while performing I/O.
     async fn on_error(&mut self, error: ReadError) -> Result<Vec<tl::enums::Updates>, ReadError> {
         log::info!("handling error: {error}");
+
         self.transport.reset();
         self.mtp.reset();
+
         log::info!(
-            "resetting sender state from read_buffer {}/{}, write_buffer {}/{}",
-            self.read_tail,
-            self.read_buffer.len(),
-            self.write_head,
+            "resetting sender state from read_buf len/cap {}/{}, write_buffer len {}",
+            self.read_buf.len(),
+            self.read_buf.capacity(),
             self.write_buffer.len(),
         );
-        self.read_tail = 0;
-        self.read_buffer.fill(0);
+
+        self.read_buf.clear();
         self.write_head = 0;
         self.write_buffer.clear();
 
@@ -571,7 +601,6 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                         self.requests
                             .iter_mut()
                             .for_each(|r| r.state = RequestState::NotSerialized);
-
                         return Ok(Vec::new());
                     }
                     Err(e) => ReadError::from(e),
@@ -615,8 +644,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
             Ok(u) => Some(u),
             Err(e) => {
                 // Annoyingly enough, `messages.affectedMessages` also has `pts`.
-                // Mostly received when deleting messages, so pretend that's the
-                // update that actually occured.
+                // Mostly received when deleting messages, so pretend that's the update that actually occured.
                 match tl::enums::messages::AffectedMessages::from_bytes(&update) {
                     Ok(tl::enums::messages::AffectedMessages::Messages(
                         tl::types::messages::AffectedMessages { pts, pts_count },
@@ -664,10 +692,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
             );
             drop(req.result.send(Ok(x)));
         } else {
-            info!(
-                "got rpc result {:?} but no such request is saved",
-                result.msg_id
-            );
+            info!("got rpc result {:?} but no such request is saved", result.msg_id);
         }
     }
 
@@ -682,10 +707,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 ))),
             );
         } else {
-            info!(
-                "got rpc error {:?} but no such request is saved",
-                error.msg_id
-            );
+            info!("got rpc error {:?} but no such request is saved", error.msg_id);
         }
     }
 
@@ -704,15 +726,12 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 RequestState::Sent(pair)
                     if pair.msg_id == bad_msg.msg_id || pair.container_msg_id == bad_msg.msg_id =>
                 {
-                    // TODO add a test to make sure we resend the request
                     if bad_msg.retryable() {
                         info!(
                             "{}; re-sending request {:?}",
                             bad_msg.description(),
                             pair.msg_id
                         );
-
-                        // TODO check if actually retryable first!
                         self.requests[i].state = RequestState::NotSerialized;
                     } else {
                         if bad_msg.fatal() {
@@ -740,10 +759,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     fn process_deserialize_error(&mut self, failure: DeserializationFailure) {
         if let Some(req) = self.pop_request(failure.msg_id) {
             debug!("got deserialization failure {:?}", failure.error);
-            drop(
-                req.result
-                    .send(Err(InvocationError::Read(failure.error.into()))),
-            );
+            drop(req.result.send(Err(InvocationError::Read(failure.error.into()))));
         } else {
             info!(
                 "got deserialization failure {:?} but no such request is saved",
@@ -759,12 +775,11 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                     panic!("got response {msg_id:?} for unsent request {pair:?}");
                 }
                 RequestState::Sent(pair) if pair.msg_id == msg_id => {
-                    return Some(self.requests.swap_remove(i))
+                    return Some(self.requests.swap_remove(i));
                 }
                 _ => {}
             }
         }
-
         None
     }
 }
@@ -863,17 +878,21 @@ pub async fn generate_auth_key<T: Transport>(
     enqueuer: Enqueuer,
 ) -> Result<(Sender<T, mtp::Encrypted>, Enqueuer), AuthorizationError> {
     info!("generating new authorization key...");
+
     let (request, data) = authentication::step1()?;
     debug!("gen auth key: sending step 1");
     let response = sender.send(request).await?;
+
     debug!("gen auth key: starting step 2");
     let (request, data) = authentication::step2(data, &response)?;
     debug!("gen auth key: sending step 2");
     let response = sender.send(request).await?;
+
     debug!("gen auth key: starting step 3");
     let (request, data) = authentication::step3(data, &response)?;
     debug!("gen auth key: sending step 3");
     let response = sender.send(request).await?;
+
     debug!("gen auth key: completing generation");
     let authentication::Finished {
         auth_key,
@@ -890,17 +909,20 @@ pub async fn generate_auth_key<T: Transport>(
                 .time_offset(time_offset)
                 .first_salt(first_salt)
                 .finish(auth_key),
+
             requests: sender.requests,
             request_rx: sender.request_rx,
             next_ping: Instant::now() + PING_DELAY,
-            read_buffer: sender.read_buffer,
-            read_tail: sender.read_tail,
+            reconnection_policy: sender.reconnection_policy,
+
+            read_buf: sender.read_buf,
+
             write_buffer: sender.write_buffer,
             write_head: sender.write_head,
+
             addr: sender.addr,
             #[cfg(feature = "proxy")]
             proxy_url: sender.proxy_url,
-            reconnection_policy: sender.reconnection_policy,
         },
         enqueuer,
     ))
