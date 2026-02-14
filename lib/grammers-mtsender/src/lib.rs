@@ -56,7 +56,7 @@ use {
 /// Telegram will close the connection with roughly a megabyte of data,
 /// so to account for the transports' own overhead, we add a few extra
 /// kilobytes to the maximum data size.
-const MAXIMUM_DATA: usize = (1024 * 1024) + (8 * 1024);
+const MAXIMUM_DATA: usize = (32 * 1024) + (8 * 1024);
 
 /// How much leading space should be reserved in a buffer to avoid moving memory.
 const LEADING_BUFFER_SPACE: usize = mtp::MAX_TRANSPORT_HEADER_LEN
