@@ -125,7 +125,7 @@ impl Banned {
 }
 
 impl Participant {
-    pub(crate) fn from_raw_channel(
+    pub fn from_raw_channel(
         chats: &mut ChatMap,
         participant: tl::enums::ChannelParticipant,
     ) -> Self {
@@ -186,7 +186,7 @@ impl Participant {
         }
     }
 
-    pub(crate) fn from_raw_chat(
+    pub fn from_raw_chat(
         chats: &mut ChatMap,
         participant: tl::enums::ChatParticipant,
     ) -> Self {
