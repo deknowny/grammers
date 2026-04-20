@@ -859,7 +859,7 @@ async fn connect_proxy_stream(
             } else {
                 Ok(NetStream::ProxySocks5(
                     tokio_socks::tcp::Socks5Stream::connect_with_password(
-                        socks_addr, addr, username, password,
+                        socks_addr, addr, &username, password,
                     )
                     .await
                     .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))?,
