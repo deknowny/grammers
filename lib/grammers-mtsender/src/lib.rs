@@ -832,7 +832,7 @@ async fn connect_proxy_stream(
         ErrorKind::NotFound,
         format!("proxy port is missing from url: {}", proxy_url),
     ))?;
-    let username = proxy.username();
+    let username = proxy.username().replace("%3B", ";");
     let password = proxy.password().unwrap_or("");
     let socks_addr = match host {
         Host::Domain(domain) => {
