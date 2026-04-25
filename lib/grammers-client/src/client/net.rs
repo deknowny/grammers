@@ -30,7 +30,7 @@ use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 #[cfg(not(feature = "test_dc"))]
 const DC_ADDRESSES: [(Ipv4Addr, u16); 6] = [
     (Ipv4Addr::new(0, 0, 0, 0), 0),
-    (Ipv4Addr::new(149, 154, 175, 100), 443),
+    (Ipv4Addr::new(149, 154, 175, 50), 443),
     (Ipv4Addr::new(149, 154, 167, 51), 443),
     (Ipv4Addr::new(149, 154, 175, 100), 443),
     (Ipv4Addr::new(91, 108, 4, 156), 443),
