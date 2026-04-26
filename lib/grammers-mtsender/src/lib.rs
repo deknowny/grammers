@@ -851,7 +851,7 @@ async fn connect_proxy_stream(
     match scheme {
         "socks5" => {
             if username.is_empty() {
-                let stream = timeout(
+                let stream = tokio::time::timeout(
                     Duration::from_secs(5),
                     tokio_socks::tcp::Socks5Stream::connect(socks_addr, addr),
                 )
@@ -861,7 +861,7 @@ async fn connect_proxy_stream(
 
                 Ok(NetStream::ProxySocks5(stream))
             } else {
-                let stream = timeout(
+                let stream = tokio::time::timeout(
                     Duration::from_secs(5),
                     tokio_socks::tcp::Socks5Stream::connect_with_password(
                         socks_addr,
