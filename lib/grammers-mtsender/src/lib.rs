@@ -815,7 +815,6 @@ async fn connect_stream(addr: &std::net::SocketAddr) -> Result<NetStream, std::i
     info!("connecting...");
     Ok(NetStream::Tcp(TcpStream::connect(addr).await?))
 }
-use tokio::time::{timeout, Duration};
 
 #[cfg(feature = "proxy")]
 async fn connect_proxy_stream(
