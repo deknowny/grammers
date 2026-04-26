@@ -815,6 +815,7 @@ async fn connect_stream(addr: &std::net::SocketAddr) -> Result<NetStream, std::i
     info!("connecting...");
     Ok(NetStream::Tcp(TcpStream::connect(addr).await?))
 }
+use tokio::time::{timeout, Duration};
 
 #[cfg(feature = "proxy")]
 async fn connect_proxy_stream(
@@ -851,19 +852,30 @@ async fn connect_proxy_stream(
     match scheme {
         "socks5" => {
             if username.is_empty() {
-                Ok(NetStream::ProxySocks5(
-                    tokio_socks::tcp::Socks5Stream::connect(socks_addr, addr)
-                        .await
-                        .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))?,
-                ))
+                let stream = timeout(
+                    Duration::from_secs(5),
+                    tokio_socks::tcp::Socks5Stream::connect(socks_addr, addr),
+                )
+                .await
+                .map_err(|_| io::Error::new(ErrorKind::TimedOut, "socks5 connect timeout"))?
+                .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))?;
+
+                Ok(NetStream::ProxySocks5(stream))
             } else {
-                Ok(NetStream::ProxySocks5(
+                let stream = timeout(
+                    Duration::from_secs(5),
                     tokio_socks::tcp::Socks5Stream::connect_with_password(
-                        socks_addr, addr, &username, password,
-                    )
-                    .await
-                    .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))?,
-                ))
+                        socks_addr,
+                        addr,
+                        &username,
+                        password,
+                    ),
+                )
+                .await
+                .map_err(|_| io::Error::new(ErrorKind::TimedOut, "socks5 connect timeout"))?
+                .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))?;
+
+                Ok(NetStream::ProxySocks5(stream))
             }
         }
         scheme => Err(io::Error::new(
