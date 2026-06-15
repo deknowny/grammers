@@ -27,6 +27,16 @@ impl InlineResult {
     /// Send this inline result to the specified chat.
     // TODO return the produced message
     pub async fn send<C: Into<PackedChat>>(&self, chat: C) -> Result<(), InvocationError> {
+        self.send_reply_to(chat, None).await
+    }
+
+    /// Send this inline result to the specified chat as a reply to a message.
+    // TODO return the produced message
+    pub async fn send_reply_to<C: Into<PackedChat>>(
+        &self,
+        chat: C,
+        reply_to_msg_id: Option<i32>,
+    ) -> Result<(), InvocationError> {
         self.client
             .invoke(&tl::functions::messages::SendInlineBotResult {
                 silent: false,
@@ -34,7 +44,17 @@ impl InlineResult {
                 clear_draft: false,
                 hide_via: false,
                 peer: chat.into().to_input_peer(),
-                reply_to: None,
+                reply_to: reply_to_msg_id.map(|reply_to_msg_id| {
+                    tl::types::InputReplyToMessage {
+                        reply_to_msg_id,
+                        top_msg_id: None,
+                        reply_to_peer_id: None,
+                        quote_text: None,
+                        quote_entities: None,
+                        quote_offset: None,
+                    }
+                    .into()
+                }),
                 random_id: generate_random_id(),
                 query_id: self.query_id,
                 id: self.id().to_string(),
