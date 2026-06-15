@@ -100,7 +100,7 @@ pub enum NetStream {
 }
 
 impl NetStream {
-    pub fn split(&mut self) -> (ReadHalf, WriteHalf) {
+    pub fn split(&mut self) -> (ReadHalf<'_>, WriteHalf<'_>) {
         match self {
             Self::Tcp(stream) => stream.split(),
             #[cfg(feature = "proxy")]
@@ -440,8 +440,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
         if let Some(container_msg_id) = self.mtp.finalize(&mut self.write_buffer) {
             for request in self.requests.iter_mut() {
-                match request.state {
-                    RequestState::Serialized(mut pair) => {
+                match &mut request.state {
+                    RequestState::Serialized(pair) => {
                         pair.container_msg_id = container_msg_id;
                     }
                     RequestState::NotSerialized | RequestState::Sent(..) => {}

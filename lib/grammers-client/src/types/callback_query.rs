@@ -88,7 +88,7 @@ impl CallbackQuery {
     }
 
     /// Answer the callback query.
-    pub fn answer(&self) -> Answer {
+    pub fn answer(&self) -> Answer<'_> {
         Answer {
             request: tl::functions::messages::SetBotCallbackAnswer {
                 alert: false,
