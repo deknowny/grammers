@@ -17,14 +17,18 @@ edition = "2021"
 proxy = ["tokio-socks", "trust-dns-resolver", "url"]
 
 [dependencies]
+aes = "0.8.4"
+base64 = "0.22.1"
 bytes = "1.5.0"
 futures-util = { version = "0.3.15", default-features = false, features = [
     "alloc"
 ] }
+getrandom = "0.2"
 grammers-crypto = { path = "../grammers-crypto", version = "0.6.1" }
 grammers-mtproto = { path = "../grammers-mtproto", version = "0.6.0" }
 grammers-tl-types = { path = "../grammers-tl-types", version = "0.6.0", features = [ "tl-mtproto" ] }
 log = "0.4.20"
+sha2 = "0.10.8"
 tokio = { version = "1.5.0", default-features = false, features = ["net", "io-util", "sync", "time"] }
 tokio-socks = { version = "0.5.1", optional = true }
 trust-dns-resolver = { version = "0.23.2", optional = true }

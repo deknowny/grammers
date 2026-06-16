@@ -186,10 +186,7 @@ impl Participant {
         }
     }
 
-    pub fn from_raw_chat(
-        chats: &mut ChatMap,
-        participant: tl::enums::ChatParticipant,
-    ) -> Self {
+    pub fn from_raw_chat(chats: &mut ChatMap, participant: tl::enums::ChatParticipant) -> Self {
         use tl::enums::ChatParticipant as P;
 
         match participant {

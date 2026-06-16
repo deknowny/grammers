@@ -189,11 +189,11 @@ impl ChatHashCache {
                 U::UserTyping(u) => self.has(u.user_id),
                 U::ChatUserTyping(u) => self.has_peer(&u.from_id),
                 U::ChatParticipants(u) => match &u.participants {
-                                tl::enums::ChatParticipants::Forbidden(_) => true,
-                                tl::enums::ChatParticipants::Participants(c) => {
-                                    c.participants.iter().all(|p| self.has_participant(p))
-                                }
-                            },
+                    tl::enums::ChatParticipants::Forbidden(_) => true,
+                    tl::enums::ChatParticipants::Participants(c) => {
+                        c.participants.iter().all(|p| self.has_participant(p))
+                    }
+                },
                 U::UserStatus(u) => self.has(u.user_id),
                 U::UserName(u) => self.has(u.user_id),
                 U::NewAuthorization(_) => true,
@@ -205,12 +205,12 @@ impl ChatHashCache {
                 U::ChatParticipantDelete(u) => self.has(u.user_id),
                 U::DcOptions(_) => true,
                 U::NotifySettings(u) => match &u.peer {
-                                tl::enums::NotifyPeer::Peer(n) => self.has_peer(&n.peer),
-                                tl::enums::NotifyPeer::NotifyForumTopic(n) => self.has_peer(&n.peer),
-                                tl::enums::NotifyPeer::NotifyUsers
-                                | tl::enums::NotifyPeer::NotifyChats
-                                | tl::enums::NotifyPeer::NotifyBroadcasts => true,
-                            },
+                    tl::enums::NotifyPeer::Peer(n) => self.has_peer(&n.peer),
+                    tl::enums::NotifyPeer::NotifyForumTopic(n) => self.has_peer(&n.peer),
+                    tl::enums::NotifyPeer::NotifyUsers
+                    | tl::enums::NotifyPeer::NotifyChats
+                    | tl::enums::NotifyPeer::NotifyBroadcasts => true,
+                },
                 U::ServiceNotification(_) => true,
                 U::Privacy(_) => true,
                 U::UserPhone(u) => self.has(u.user_id),
@@ -244,9 +244,9 @@ impl ChatHashCache {
                 U::ChannelWebPage(u) => self.has(u.channel_id),
                 U::DialogPinned(u) => self.has_dialog_peer(&u.peer),
                 U::PinnedDialogs(u) => match &u.order {
-                                Some(o) => o.iter().all(|d| self.has_dialog_peer(d)),
-                                None => true,
-                            },
+                    Some(o) => o.iter().all(|d| self.has_dialog_peer(d)),
+                    None => true,
+                },
                 U::BotWebhookJson(_) => true,
                 U::BotWebhookJsonquery(_) => true,
                 U::BotShippingQuery(u) => self.has(u.user_id),
@@ -262,13 +262,13 @@ impl ChatHashCache {
                 U::MessagePoll(_) => true,
                 U::ChatDefaultBannedRights(u) => self.has_peer(&u.peer),
                 U::FolderPeers(u) => u.folder_peers.iter().all(|f| match f {
-                                tl::enums::FolderPeer::Peer(p) => self.has_peer(&p.peer),
-                            }),
+                    tl::enums::FolderPeer::Peer(p) => self.has_peer(&p.peer),
+                }),
                 U::PeerSettings(u) => self.has_peer(&u.peer),
                 U::PeerLocated(u) => u.peers.iter().all(|p| match p {
-                                tl::enums::PeerLocated::Located(l) => self.has_peer(&l.peer),
-                                tl::enums::PeerLocated::PeerSelfLocated(_) => true,
-                            }),
+                    tl::enums::PeerLocated::Located(l) => self.has_peer(&l.peer),
+                    tl::enums::PeerLocated::PeerSelfLocated(_) => true,
+                }),
                 U::NewScheduledMessage(u) => self.extend_from_message(&u.message),
                 U::DeleteScheduledMessages(u) => self.has_peer(&u.peer),
                 U::Theme(_) => true,
@@ -288,63 +288,63 @@ impl ChatHashCache {
                 U::PinnedChannelMessages(u) => self.has(u.channel_id),
                 U::Chat(_) => true,
                 U::GroupCallParticipants(u) => u.participants.iter().all(|p| match p {
-                                tl::enums::GroupCallParticipant::Participant(p) => self.has_peer(&p.peer),
-                            }),
+                    tl::enums::GroupCallParticipant::Participant(p) => self.has_peer(&p.peer),
+                }),
                 U::GroupCall(_) => true,
                 U::PeerHistoryTtl(u) => self.has_peer(&u.peer),
                 U::ChatParticipant(u) => {
-                                self.has(u.actor_id)
-                                    && self.has(u.user_id)
-                                    && match &u.prev_participant {
-                                        Some(p) => self.has_participant(p),
-                                        None => true,
-                                    }
-                                    && match &u.new_participant {
-                                        Some(p) => self.has_participant(p),
-                                        None => true,
-                                    }
-                                    && match &u.invite {
-                                        Some(tl::enums::ExportedChatInvite::ChatInviteExported(e)) => {
-                                            self.has(e.admin_id)
-                                        }
-                                        Some(tl::enums::ExportedChatInvite::ChatInvitePublicJoinRequests)
-                                        | None => true,
-                                    }
+                    self.has(u.actor_id)
+                        && self.has(u.user_id)
+                        && match &u.prev_participant {
+                            Some(p) => self.has_participant(p),
+                            None => true,
+                        }
+                        && match &u.new_participant {
+                            Some(p) => self.has_participant(p),
+                            None => true,
+                        }
+                        && match &u.invite {
+                            Some(tl::enums::ExportedChatInvite::ChatInviteExported(e)) => {
+                                self.has(e.admin_id)
                             }
+                            Some(tl::enums::ExportedChatInvite::ChatInvitePublicJoinRequests)
+                            | None => true,
+                        }
+                }
                 U::ChannelParticipant(u) => {
-                                self.has(u.channel_id)
-                                    && self.has(u.actor_id)
-                                    && self.has(u.user_id)
-                                    && match &u.prev_participant {
-                                        Some(p) => self.has_channel_participant(p),
-                                        None => true,
-                                    }
-                                    && match &u.new_participant {
-                                        Some(p) => self.has_channel_participant(p),
-                                        None => true,
-                                    }
-                                    && match &u.invite {
-                                        Some(tl::enums::ExportedChatInvite::ChatInviteExported(e)) => {
-                                            self.has(e.admin_id)
-                                        }
-                                        Some(tl::enums::ExportedChatInvite::ChatInvitePublicJoinRequests)
-                                        | None => true,
-                                    }
+                    self.has(u.channel_id)
+                        && self.has(u.actor_id)
+                        && self.has(u.user_id)
+                        && match &u.prev_participant {
+                            Some(p) => self.has_channel_participant(p),
+                            None => true,
+                        }
+                        && match &u.new_participant {
+                            Some(p) => self.has_channel_participant(p),
+                            None => true,
+                        }
+                        && match &u.invite {
+                            Some(tl::enums::ExportedChatInvite::ChatInviteExported(e)) => {
+                                self.has(e.admin_id)
                             }
+                            Some(tl::enums::ExportedChatInvite::ChatInvitePublicJoinRequests)
+                            | None => true,
+                        }
+                }
                 U::BotStopped(u) => self.has(u.user_id),
                 U::GroupCallConnection(_) => true,
                 U::BotCommands(u) => self.has_peer(&u.peer) && self.has(u.bot_id),
                 U::PendingJoinRequests(u) => self.has_peer(&u.peer),
                 U::BotChatInviteRequester(u) => {
-                                self.has_peer(&u.peer)
-                                    && self.has(u.user_id)
-                                    && match &u.invite {
-                                        tl::enums::ExportedChatInvite::ChatInviteExported(e) => {
-                                            self.has(e.admin_id)
-                                        }
-                                        tl::enums::ExportedChatInvite::ChatInvitePublicJoinRequests => true,
-                                    }
+                    self.has_peer(&u.peer)
+                        && self.has(u.user_id)
+                        && match &u.invite {
+                            tl::enums::ExportedChatInvite::ChatInviteExported(e) => {
+                                self.has(e.admin_id)
                             }
+                            tl::enums::ExportedChatInvite::ChatInvitePublicJoinRequests => true,
+                        }
+                }
                 U::MessageReactions(u) => self.has_peer(&u.peer),
                 U::AttachMenuBots => true,
                 U::WebViewResultSent(_) => true,
@@ -385,13 +385,13 @@ impl ChatHashCache {
                 U::BotEditBusinessMessage(u) => self.extend_from_message(&u.message),
                 U::BotDeleteBusinessMessage(_) => true,
                 U::BotBusinessConnect(u) => match &u.connection {
-                                tl::enums::BotBusinessConnection::Connection(con) => self.has(con.user_id),
-                            },
+                    tl::enums::BotBusinessConnection::Connection(con) => self.has(con.user_id),
+                },
                 U::BroadcastRevenueTransactions(u) => self.has_peer(&u.peer),
                 U::StarsBalance(_) => true,
                 U::BusinessBotCallbackQuery(u) => {
-                                self.has(u.user_id) && self.extend_from_message(&u.message)
-                            }
+                    self.has(u.user_id) && self.extend_from_message(&u.message)
+                }
                 U::StarsRevenueStatus(u) => self.has_peer(&u.peer),
                 U::BotPurchasedPaidMedia(u) => self.has(u.user_id),
                 U::PaidReactionPrivacy(_) => true,
@@ -555,8 +555,8 @@ impl ChatHashCache {
                         MA::SecureValuesSent(_) => true,
                         MA::ContactSignUp => true,
                         MA::GeoProximityReached(c) => {
-                                                self.has_peer(&c.from_id) && self.has_peer(&c.to_id)
-                                            }
+                            self.has_peer(&c.from_id) && self.has_peer(&c.to_id)
+                        }
                         MA::GroupCall(_) => true,
                         MA::InviteToGroupCall(_) => true,
                         MA::SetMessagesTtl(_) => true,
@@ -571,13 +571,13 @@ impl ChatHashCache {
                         MA::SuggestProfilePhoto(_) => true,
                         MA::RequestedPeer(c) => c.peers.iter().all(|p| self.has_peer(p)),
                         MA::RequestedPeerSentMe(c) => {
-                                                c.peers.iter().all(|p| self.has_requested_peer(p))
-                                            }
+                            c.peers.iter().all(|p| self.has_requested_peer(p))
+                        }
                         MA::SetChatWallPaper(_) => true,
                         MA::GiftCode(c) => match &c.boost_peer {
-                                                Some(p) => self.has_peer(p),
-                                                None => true,
-                                            },
+                            Some(p) => self.has_peer(p),
+                            None => true,
+                        },
                         MA::GiveawayLaunch(_) => true,
                         MA::GiveawayResults(_) => true,
                         MA::BoostApply(_) => true,
@@ -585,8 +585,20 @@ impl ChatHashCache {
                         MA::PaymentRefunded(c) => self.has_peer(&c.peer),
                         MA::GiftStars(_) => true,
                         MA::PrizeStars(c) => self.has_peer(&c.boost_peer),
-                        MA::StarGift(c) => c.from_id.as_ref().map(|p| self.has_peer(&p)).unwrap_or(true) && c.peer.as_ref().map(|p| self.has_peer(&p)).unwrap_or(true),
-                        MA::StarGiftUnique(c) => c.from_id.as_ref().map(|p| self.has_peer(&p)).unwrap_or(true) && c.peer.as_ref().map(|p| self.has_peer(&p)).unwrap_or(true),
+                        MA::StarGift(c) => {
+                            c.from_id
+                                .as_ref()
+                                .map(|p| self.has_peer(&p))
+                                .unwrap_or(true)
+                                && c.peer.as_ref().map(|p| self.has_peer(&p)).unwrap_or(true)
+                        }
+                        MA::StarGiftUnique(c) => {
+                            c.from_id
+                                .as_ref()
+                                .map(|p| self.has_peer(&p))
+                                .unwrap_or(true)
+                                && c.peer.as_ref().map(|p| self.has_peer(&p)).unwrap_or(true)
+                        }
                     }
             }
         }

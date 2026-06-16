@@ -198,7 +198,10 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn request_login_code(&self, phone: &str) -> Result<(LoginToken, tl::types::auth::SentCode), AuthorizationError> {
+    pub async fn request_login_code(
+        &self,
+        phone: &str,
+    ) -> Result<(LoginToken, tl::types::auth::SentCode), AuthorizationError> {
         let request = tl::functions::auth::SendCode {
             phone_number: phone.to_string(),
             api_id: self.0.config.api_id,
@@ -247,10 +250,13 @@ impl Client {
             Err(e) => return Err(e.into()),
         };
 
-        Ok((LoginToken {
-            phone: phone.to_string(),
-            phone_code_hash: sent_code.phone_code_hash.clone(),
-        }, sent_code))
+        Ok((
+            LoginToken {
+                phone: phone.to_string(),
+                phone_code_hash: sent_code.phone_code_hash.clone(),
+            },
+            sent_code,
+        ))
     }
 
     /// Signs in to the user account.

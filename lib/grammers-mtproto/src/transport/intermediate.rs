@@ -55,12 +55,13 @@ impl Transport for Intermediate {
         }
 
         let len = i32::from_le_bytes(buffer[0..4].try_into().unwrap());
-        if (buffer.len() as i32) < len {
-            return Err(Error::MissingBytes);
-        }
 
         if len <= 4 {
             if len >= 4 {
+                if buffer.len() < 8 {
+                    return Err(Error::MissingBytes);
+                }
+
                 let data = i32::from_le_bytes(buffer[4..8].try_into().unwrap());
                 return Err(Error::BadStatus {
                     status: (-data) as u32,
@@ -70,11 +71,17 @@ impl Transport for Intermediate {
         }
 
         let len = len as usize;
+        let frame_len = 4usize
+            .checked_add(len)
+            .ok_or(Error::BadLen { got: i32::MAX })?;
+        if buffer.len() < frame_len {
+            return Err(Error::MissingBytes);
+        }
 
         Ok(UnpackedOffset {
             data_start: 4,
-            data_end: 4 + len,
-            next_offset: 4 + len,
+            data_end: frame_len,
+            next_offset: frame_len,
         })
     }
 
@@ -124,6 +131,23 @@ mod tests {
         let mut buffer = DequeBuffer::with_capacity(1, 0);
         buffer.extend([1]);
         assert_eq!(transport.unpack(&buffer[..],), Err(Error::MissingBytes));
+    }
+
+    #[test]
+    fn unpack_partial_payload() {
+        let mut transport = Intermediate::new();
+        let mut buffer = DequeBuffer::with_capacity(0, 0);
+        buffer.extend(&(128_i32).to_le_bytes());
+        buffer.extend([0; 124]);
+        assert_eq!(transport.unpack(&buffer[..]), Err(Error::MissingBytes));
+    }
+
+    #[test]
+    fn unpack_partial_bad_status() {
+        let mut transport = Intermediate::new();
+        let mut buffer = DequeBuffer::with_capacity(4, 0);
+        buffer.extend(&(4_i32).to_le_bytes());
+        assert_eq!(transport.unpack(&buffer[..]), Err(Error::MissingBytes));
     }
 
     #[test]

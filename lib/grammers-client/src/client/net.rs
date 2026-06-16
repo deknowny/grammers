@@ -50,8 +50,8 @@ const DEFAULT_DC: i32 = 2;
 pub(crate) async fn connect_sender(
     dc_id: i32,
     config: &Config,
-) -> Result<(Sender<transport::Full, mtp::Encrypted>, Enqueuer), AuthorizationError> {
-    let transport = transport::Full::new();
+) -> Result<(Sender<transport::Intermediate, mtp::Encrypted>, Enqueuer), AuthorizationError> {
+    let transport = transport::Intermediate::new();
 
     let addr: SocketAddr = if let Some(ip) = config.params.server_addr {
         ip
@@ -71,6 +71,7 @@ pub(crate) async fn connect_sender(
                 transport,
                 addr,
                 auth_key,
+                dc_id as i16,
                 url,
                 config.params.reconnection_policy,
             )
@@ -91,8 +92,14 @@ pub(crate) async fn connect_sender(
 
         #[cfg(feature = "proxy")]
         let (sender, tx) = if let Some(url) = config.params.proxy_url.as_ref() {
-            sender::connect_via_proxy(transport, addr, url, config.params.reconnection_policy)
-                .await?
+            sender::connect_via_proxy(
+                transport,
+                addr,
+                dc_id as i16,
+                url,
+                config.params.reconnection_policy,
+            )
+            .await?
         } else {
             sender::connect(transport, addr, config.params.reconnection_policy).await?
         };
@@ -372,7 +379,7 @@ impl Client {
 }
 
 impl Connection {
-    fn new(sender: Sender<transport::Full, mtp::Encrypted>, request_tx: Enqueuer) -> Self {
+    fn new(sender: Sender<transport::Intermediate, mtp::Encrypted>, request_tx: Enqueuer) -> Self {
         Self {
             sender: AsyncMutex::new(sender),
             request_tx: RwLock::new(request_tx),

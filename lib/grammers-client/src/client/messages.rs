@@ -597,7 +597,7 @@ impl Client {
                 invert_media: false,
                 quick_reply_shortcut: None,
                 effect: None,
-                allow_paid_floodskip: false
+                allow_paid_floodskip: false,
             })
             .await
         } else {
@@ -629,22 +629,22 @@ impl Client {
                 invert_media: false,
                 quick_reply_shortcut: None,
                 effect: None,
-                allow_paid_floodskip: false
+                allow_paid_floodskip: false,
             })
             .await
         }?;
 
         Ok(match updates {
-            tl::enums::Updates::UpdateShortSentMessage(_) => {
-                None
-            }
+            tl::enums::Updates::UpdateShortSentMessage(_) => None,
             updates => {
-                if let Some(Some(unwrapped)) = map_random_ids_to_messages(self, &[random_id], updates).pop() {
+                if let Some(Some(unwrapped)) =
+                    map_random_ids_to_messages(self, &[random_id], updates).pop()
+                {
                     Some(unwrapped)
                 } else {
                     None
                 }
-            },
+            }
         })
     }
 
@@ -792,7 +792,7 @@ impl Client {
             noforwards: false,
             quick_reply_shortcut: None,
             allow_paid_floodskip: false,
-            video_timestamp: None
+            video_timestamp: None,
         };
         let result = self.invoke(&request).await?;
         Ok(map_random_ids_to_messages(self, &request.random_id, result))

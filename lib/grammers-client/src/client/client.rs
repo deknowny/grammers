@@ -141,7 +141,7 @@ pub struct ClientState {
 }
 
 pub struct Connection {
-    pub sender: AsyncMutex<Sender<transport::Full, mtp::Encrypted>>,
+    pub sender: AsyncMutex<Sender<transport::Intermediate, mtp::Encrypted>>,
     pub request_tx: RwLock<Enqueuer>,
     pub(crate) step_counter: AtomicU32,
 }

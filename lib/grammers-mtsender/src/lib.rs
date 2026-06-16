@@ -9,6 +9,7 @@
 #![deny(unsafe_code)]
 
 mod errors;
+mod mtproxy;
 mod reconnection;
 
 pub use crate::reconnection::*;
@@ -27,11 +28,12 @@ use log::{debug, error, info, trace, warn};
 use std::io;
 use std::io::Error;
 use std::ops::ControlFlow;
-use std::pin::pin;
+use std::pin::{pin, Pin};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tl::Serializable;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -41,6 +43,7 @@ use tokio::time::{sleep_until, Duration, Instant};
 
 #[cfg(feature = "proxy")]
 use {
+    crate::mtproxy::{MtProxyConfig, MtProxyReadHalf, MtProxyStream, MtProxyWriteHalf},
     std::io::ErrorKind,
     std::net::{IpAddr, SocketAddr},
     tokio_socks::tcp::Socks5Stream,
@@ -97,14 +100,95 @@ pub enum NetStream {
     Tcp(TcpStream),
     #[cfg(feature = "proxy")]
     ProxySocks5(Socks5Stream<TcpStream>),
+    #[cfg(feature = "proxy")]
+    ProxyMtProxy(MtProxyStream),
 }
 
 impl NetStream {
-    pub fn split(&mut self) -> (ReadHalf<'_>, WriteHalf<'_>) {
+    pub fn split(&mut self) -> (NetReadHalf<'_>, NetWriteHalf<'_>) {
         match self {
-            Self::Tcp(stream) => stream.split(),
+            Self::Tcp(stream) => {
+                let (read, write) = stream.split();
+                (NetReadHalf::Tcp(read), NetWriteHalf::Tcp(write))
+            }
             #[cfg(feature = "proxy")]
-            Self::ProxySocks5(stream) => stream.split(),
+            Self::ProxySocks5(stream) => {
+                let (read, write) = stream.split();
+                (NetReadHalf::Socks5(read), NetWriteHalf::Socks5(write))
+            }
+            #[cfg(feature = "proxy")]
+            Self::ProxyMtProxy(stream) => {
+                let (read, write) = stream.split();
+                (NetReadHalf::MtProxy(read), NetWriteHalf::MtProxy(write))
+            }
+        }
+    }
+}
+
+pub enum NetReadHalf<'a> {
+    Tcp(ReadHalf<'a>),
+    #[cfg(feature = "proxy")]
+    Socks5(ReadHalf<'a>),
+    #[cfg(feature = "proxy")]
+    MtProxy(MtProxyReadHalf<'a>),
+}
+
+impl AsyncRead for NetReadHalf<'_> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Tcp(read) => Pin::new(read).poll_read(cx, buf),
+            #[cfg(feature = "proxy")]
+            Self::Socks5(read) => Pin::new(read).poll_read(cx, buf),
+            #[cfg(feature = "proxy")]
+            Self::MtProxy(read) => Pin::new(read).poll_read(cx, buf),
+        }
+    }
+}
+
+pub enum NetWriteHalf<'a> {
+    Tcp(WriteHalf<'a>),
+    #[cfg(feature = "proxy")]
+    Socks5(WriteHalf<'a>),
+    #[cfg(feature = "proxy")]
+    MtProxy(MtProxyWriteHalf<'a>),
+}
+
+impl AsyncWrite for NetWriteHalf<'_> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match &mut *self {
+            Self::Tcp(write) => Pin::new(write).poll_write(cx, buf),
+            #[cfg(feature = "proxy")]
+            Self::Socks5(write) => Pin::new(write).poll_write(cx, buf),
+            #[cfg(feature = "proxy")]
+            Self::MtProxy(write) => Pin::new(write).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Tcp(write) => Pin::new(write).poll_flush(cx),
+            #[cfg(feature = "proxy")]
+            Self::Socks5(write) => Pin::new(write).poll_flush(cx),
+            #[cfg(feature = "proxy")]
+            Self::MtProxy(write) => Pin::new(write).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Tcp(write) => Pin::new(write).poll_shutdown(cx),
+            #[cfg(feature = "proxy")]
+            Self::Socks5(write) => Pin::new(write).poll_shutdown(cx),
+            #[cfg(feature = "proxy")]
+            Self::MtProxy(write) => Pin::new(write).poll_shutdown(cx),
         }
     }
 }
@@ -119,6 +203,8 @@ pub struct Sender<T: Transport, M: Mtp> {
 
     #[cfg(feature = "proxy")]
     proxy_url: Option<String>,
+    #[cfg(feature = "proxy")]
+    proxy_dc_id: i16,
 
     pub requests: Vec<Request>,
     request_rx: mpsc::UnboundedReceiver<Request>,
@@ -171,7 +257,10 @@ impl Enqueuer {
         let body = request.to_bytes();
         assert!(body.len() >= 4);
         let req_id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
-        debug!("enqueueing request {} to be serialized", tl::name_for_id(req_id));
+        debug!(
+            "enqueueing request {} to be serialized",
+            tl::name_for_id(req_id)
+        );
 
         let (tx, rx) = oneshot::channel();
         if let Err(err) = self.0.send(Request {
@@ -202,6 +291,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 addr,
                 #[cfg(feature = "proxy")]
                 proxy_url: None,
+                #[cfg(feature = "proxy")]
+                proxy_dc_id: 0,
                 requests: vec![],
                 request_rx: rx,
                 next_ping: Instant::now() + PING_DELAY,
@@ -224,11 +315,12 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         transport: T,
         mtp: M,
         addr: SocketAddr,
+        proxy_dc_id: i16,
         proxy_url: &str,
         reconnection_policy: &'static dyn ReconnectionPolicy,
     ) -> Result<(Self, Enqueuer), io::Error> {
         info!("connecting...");
-        let stream = connect_proxy_stream(&addr, proxy_url).await?;
+        let stream = connect_proxy_stream(&addr, proxy_url, proxy_dc_id).await?;
         let (tx, rx) = mpsc::unbounded_channel();
         Ok((
             Self {
@@ -237,6 +329,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 mtp,
                 addr,
                 proxy_url: Some(proxy_url.to_string()),
+                proxy_dc_id,
                 requests: vec![],
                 request_rx: rx,
                 next_ping: Instant::now() + PING_DELAY,
@@ -271,7 +364,10 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     ) -> oneshot::Receiver<Result<Vec<u8>, InvocationError>> {
         assert!(body.len() >= 4);
         let req_id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
-        debug!("enqueueing request {} to be serialized", tl::name_for_id(req_id));
+        debug!(
+            "enqueueing request {} to be serialized",
+            tl::name_for_id(req_id)
+        );
 
         let (tx, rx) = oneshot::channel();
         self.requests.push(Request {
@@ -291,7 +387,9 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
             match rx.try_recv() {
                 Ok(x) => break x,
                 Err(TryRecvError::Empty) => continue,
-                Err(TryRecvError::Closed) => panic!("request channel dropped before receiving a result"),
+                Err(TryRecvError::Closed) => {
+                    panic!("request channel dropped before receiving a result")
+                }
             }
         }
     }
@@ -309,7 +407,10 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
         self.try_fill_write();
         let write_len = self.write_buffer.len().saturating_sub(self.write_head);
-        trace!("reading bytes and sending up to {} bytes via network", write_len);
+        trace!(
+            "reading bytes and sending up to {} bytes via network",
+            write_len
+        );
 
         let (mut reader, mut writer) = self.stream.split();
         let sel = {
@@ -372,7 +473,12 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         loop {
             #[cfg(feature = "proxy")]
             let res = if self.proxy_url.is_some() {
-                connect_proxy_stream(&self.addr, self.proxy_url.as_ref().unwrap()).await
+                connect_proxy_stream(
+                    &self.addr,
+                    self.proxy_url.as_ref().unwrap(),
+                    self.proxy_dc_id,
+                )
+                .await
             } else {
                 connect_stream(&self.addr).await
             };
@@ -382,7 +488,10 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
             match res {
                 Ok(result) => {
-                    log::info!("auto-reconnect success after {} failed attempt(s)", attempts);
+                    log::info!(
+                        "auto-reconnect success after {} failed attempt(s)",
+                        attempts
+                    );
                     self.stream = result;
                     return Ok(());
                 }
@@ -464,7 +573,10 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         }
 
         trace!("read {} bytes from the network", n);
-        trace!("trying to unpack buffer of {} bytes...", self.read_buf.len());
+        trace!(
+            "trying to unpack buffer of {} bytes...",
+            self.read_buf.len()
+        );
 
         let mut updates = Vec::new();
         let mut consumed = 0usize;
@@ -482,14 +594,12 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                     let result = self.mtp.deserialize(payload)?;
                     self.process_mtp_buffer(result, &mut updates);
 
-                    consumed = consumed
-                        .checked_add(offset.next_offset)
-                        .ok_or_else(|| {
-                            ReadError::Io(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "overflow while advancing read buffer",
-                            ))
-                        })?;
+                    consumed = consumed.checked_add(offset.next_offset).ok_or_else(|| {
+                        ReadError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "overflow while advancing read buffer",
+                        ))
+                    })?;
 
                     if consumed > self.read_buf.len() {
                         return Err(ReadError::Io(io::Error::new(
@@ -537,10 +647,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
         // If the buffer had to grow a lot for a one-off big send, recreate it to drop Vec capacity.
         if sent_len > WRITE_SHRINK_ON_SEND_OVER {
-            self.write_buffer = DequeBuffer::with_capacity(
-                WRITE_INITIAL_BACK_CAPACITY,
-                LEADING_BUFFER_SPACE,
-            );
+            self.write_buffer =
+                DequeBuffer::with_capacity(WRITE_INITIAL_BACK_CAPACITY, LEADING_BUFFER_SPACE);
         }
 
         for req in self.requests.iter_mut() {
@@ -692,7 +800,10 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
             );
             drop(req.result.send(Ok(x)));
         } else {
-            info!("got rpc result {:?} but no such request is saved", result.msg_id);
+            info!(
+                "got rpc result {:?} but no such request is saved",
+                result.msg_id
+            );
         }
     }
 
@@ -707,7 +818,10 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 ))),
             );
         } else {
-            info!("got rpc error {:?} but no such request is saved", error.msg_id);
+            info!(
+                "got rpc error {:?} but no such request is saved",
+                error.msg_id
+            );
         }
     }
 
@@ -759,7 +873,10 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     fn process_deserialize_error(&mut self, failure: DeserializationFailure) {
         if let Some(req) = self.pop_request(failure.msg_id) {
             debug!("got deserialization failure {:?}", failure.error);
-            drop(req.result.send(Err(InvocationError::Read(failure.error.into()))));
+            drop(
+                req.result
+                    .send(Err(InvocationError::Read(failure.error.into()))),
+            );
         } else {
             info!(
                 "got deserialization failure {:?} but no such request is saved",
@@ -803,11 +920,19 @@ pub async fn connect<T: Transport>(
 pub async fn connect_via_proxy<'a, T: Transport>(
     transport: T,
     addr: std::net::SocketAddr,
+    proxy_dc_id: i16,
     proxy_url: &str,
     rc_policy: &'static dyn ReconnectionPolicy,
 ) -> Result<(Sender<T, mtp::Encrypted>, Enqueuer), AuthorizationError> {
-    let (sender, enqueuer) =
-        Sender::connect_via_proxy(transport, mtp::Plain::new(), addr, proxy_url, rc_policy).await?;
+    let (sender, enqueuer) = Sender::connect_via_proxy(
+        transport,
+        mtp::Plain::new(),
+        addr,
+        proxy_dc_id,
+        proxy_url,
+        rc_policy,
+    )
+    .await?;
     generate_auth_key(sender, enqueuer).await
 }
 
@@ -820,7 +945,28 @@ async fn connect_stream(addr: &std::net::SocketAddr) -> Result<NetStream, std::i
 async fn connect_proxy_stream(
     addr: &SocketAddr,
     proxy_url: &str,
+    proxy_dc_id: i16,
 ) -> Result<NetStream, std::io::Error> {
+    if let Some(config) = MtProxyConfig::parse(proxy_url) {
+        let config = config?;
+        match &config.mode {
+            crate::mtproxy::MtProxyMode::Obfuscated => {
+                info!("connecting via mtproxy obfuscated...");
+            }
+            crate::mtproxy::MtProxyMode::FakeTls { domain } => {
+                info!("connecting via mtproxy faketls for domain {domain}...");
+            }
+        }
+        let proxy_addr = resolve_proxy_addr(&config.host, config.port).await?;
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            MtProxyStream::connect(proxy_addr, &config, proxy_dc_id),
+        )
+        .await
+        .map_err(|_| io::Error::new(ErrorKind::TimedOut, "mtproxy connect timeout"))??;
+        return Ok(NetStream::ProxyMtProxy(stream));
+    }
+
     let proxy =
         url::Url::parse(proxy_url).map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
     let scheme = proxy.scheme();
@@ -835,15 +981,7 @@ async fn connect_proxy_stream(
     let username = proxy.username().replace("%3B", ";");
     let password = proxy.password().unwrap_or("");
     let socks_addr = match host {
-        Host::Domain(domain) => {
-            let resolver = AsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
-            let response = resolver.lookup_ip(domain).await?;
-            let socks_ip_addr = response.into_iter().next().ok_or(io::Error::new(
-                ErrorKind::NotFound,
-                format!("proxy host did not return any ip address: {}", domain),
-            ))?;
-            SocketAddr::new(socks_ip_addr, port)
-        }
+        Host::Domain(domain) => resolve_proxy_addr(domain, port).await?,
         Host::Ipv4(v4) => SocketAddr::new(IpAddr::from(v4), port),
         Host::Ipv6(v6) => SocketAddr::new(IpAddr::from(v6), port),
     };
@@ -864,10 +1002,7 @@ async fn connect_proxy_stream(
                 let stream = tokio::time::timeout(
                     Duration::from_secs(5),
                     tokio_socks::tcp::Socks5Stream::connect_with_password(
-                        socks_addr,
-                        addr,
-                        &username,
-                        password,
+                        socks_addr, addr, &username, password,
                     ),
                 )
                 .await
@@ -882,6 +1017,21 @@ async fn connect_proxy_stream(
             format!("proxy scheme not supported: {}", scheme),
         )),
     }
+}
+
+#[cfg(feature = "proxy")]
+async fn resolve_proxy_addr(host: &str, port: u16) -> Result<SocketAddr, std::io::Error> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+
+    let resolver = AsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+    let response = resolver.lookup_ip(host).await?;
+    let ip_addr = response.into_iter().next().ok_or(io::Error::new(
+        ErrorKind::NotFound,
+        format!("proxy host did not return any ip address: {}", host),
+    ))?;
+    Ok(SocketAddr::new(ip_addr, port))
 }
 
 pub async fn generate_auth_key<T: Transport>(
@@ -934,6 +1084,8 @@ pub async fn generate_auth_key<T: Transport>(
             addr: sender.addr,
             #[cfg(feature = "proxy")]
             proxy_url: sender.proxy_url,
+            #[cfg(feature = "proxy")]
+            proxy_dc_id: sender.proxy_dc_id,
         },
         enqueuer,
     ))
@@ -959,6 +1111,7 @@ pub async fn connect_via_proxy_with_auth<'a, T: Transport>(
     transport: T,
     addr: std::net::SocketAddr,
     auth_key: [u8; 256],
+    proxy_dc_id: i16,
     proxy_url: &str,
     rc_policy: &'static dyn ReconnectionPolicy,
 ) -> Result<(Sender<T, mtp::Encrypted>, Enqueuer), io::Error> {
@@ -966,6 +1119,7 @@ pub async fn connect_via_proxy_with_auth<'a, T: Transport>(
         transport,
         mtp::Encrypted::build().finish(auth_key),
         addr,
+        proxy_dc_id,
         proxy_url,
         rc_policy,
     )
