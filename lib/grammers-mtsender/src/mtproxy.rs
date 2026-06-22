@@ -214,7 +214,6 @@ impl MtProxyStream {
             },
         )
     }
-
 }
 
 pub struct MtProxyReadHalf<'a> {

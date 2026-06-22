@@ -52,6 +52,21 @@ impl std::error::Error for SignInError {}
 /// Most requests to the API require the user to have authorized their key, stored in the session,
 /// before being able to use them.
 impl Client {
+    /// Switches the main sender to another datacenter without exporting authorization.
+    ///
+    /// This is useful during unauthenticated login flows such as QR login token migration, where
+    /// Telegram asks the client to import a login token on a specific datacenter.
+    pub async fn switch_dc(&self, dc_id: i32) -> Result<(), AuthorizationError> {
+        let (sender, request_tx) = connect_sender(dc_id, &self.0.config).await?;
+        {
+            *self.0.conn.sender.lock().await = sender;
+            *self.0.conn.request_tx.write().unwrap() = request_tx;
+            let mut state = self.0.state.write().unwrap();
+            state.dc_id = dc_id;
+        }
+        Ok(())
+    }
+
     /// Returns `true` if the current account is authorized. Otherwise,
     /// logging in will be required before being able to invoke requests.
     ///

@@ -37,6 +37,18 @@ impl InlineResult {
         chat: C,
         reply_to_msg_id: Option<i32>,
     ) -> Result<(), InvocationError> {
+        self.send_reply_to_with_random_id(chat, reply_to_msg_id, generate_random_id())
+            .await
+    }
+
+    /// Send this inline result with a caller-provided Telegram idempotency key.
+    // TODO return the produced message
+    pub async fn send_reply_to_with_random_id<C: Into<PackedChat>>(
+        &self,
+        chat: C,
+        reply_to_msg_id: Option<i32>,
+        random_id: i64,
+    ) -> Result<(), InvocationError> {
         self.client
             .invoke(&tl::functions::messages::SendInlineBotResult {
                 silent: false,
@@ -55,7 +67,7 @@ impl InlineResult {
                     }
                     .into()
                 }),
-                random_id: generate_random_id(),
+                random_id,
                 query_id: self.query_id,
                 id: self.id().to_string(),
                 schedule_date: None,

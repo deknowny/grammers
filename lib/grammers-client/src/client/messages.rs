@@ -564,9 +564,21 @@ impl Client {
         chat: C,
         message: M,
     ) -> Result<Option<Message>, InvocationError> {
+        self.send_message_lossy_with_random_id(chat, message, generate_random_id())
+            .await
+    }
+
+    pub async fn send_message_lossy_with_random_id<
+        C: Into<InputPeer>,
+        M: Into<types::InputMessage>,
+    >(
+        &self,
+        chat: C,
+        message: M,
+        random_id: i64,
+    ) -> Result<Option<Message>, InvocationError> {
         let chat = chat.into();
         let message = message.into();
-        let random_id = generate_random_id();
         let entities = parse_mention_entities(self, message.entities.clone());
         let updates = if let Some(media) = message.media.clone() {
             self.invoke(&tl::functions::messages::SendMedia {
